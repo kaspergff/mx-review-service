@@ -150,8 +150,7 @@ def _analyze_action(action: dict) -> dict:
     elif atype in ('CallRestServiceAction', 'CallWebServiceAction'):
         r['url'] = str(action.get('LocationTemplate', ''))[:120]
         r['http_method'] = action.get('HttpMethod', '')
-        result_handling = action.get('ResultHandlingType', '')
-        r['result_handling'] = result_handling
+        r['result_handling'] = action.get('ResultHandlingType', '')
 
     elif atype == 'LogMessageAction':
         mt = action.get('MessageTemplate', {})
@@ -167,6 +166,45 @@ def _analyze_action(action: dict) -> dict:
             text = ''
         r['message'] = str(text).strip()[:120]
         r['blocking'] = action.get('Blocking', False)
+
+    elif atype == 'ListOperationAction':
+        op = action.get('ListOperation', {})
+        if isinstance(op, dict):
+            op_type = op.get('$Type', '').replace('Microflows$', '')
+            r['list_operation'] = op_type
+            r['list_variable'] = action.get('ListVariableName', '')
+            # Filter/Find: expression staat op de operatie
+            expr = op.get('Expression', '').replace('\n', ' ').strip()
+            if expr:
+                r['expression'] = expr
+            r['variable'] = op.get('OutputVariableName', action.get('VariableName', ''))
+
+    elif atype == 'AggregateListAction':
+        r['list_variable'] = action.get('ListVariableName', '')
+        r['aggregate_function'] = action.get('AggregateFunction', '')
+        attr_full = action.get('AggregateVariableName', '')
+        r['aggregate_attribute'] = attr_full.split('.')[-1] if attr_full else ''
+        r['variable'] = action.get('VariableName', '')
+
+    elif atype == 'CreateVariableAction':
+        r['variable'] = action.get('VariableName', '')
+        r['variable_type'] = _parse_type(action.get('VariableType', {}))
+        r['expression'] = str(action.get('InitialValue', '')).replace('\n', ' ').strip()
+
+    elif atype == 'ChangeVariableAction':
+        r['variable'] = action.get('VariableName', '')
+        r['expression'] = str(action.get('Value', '')).replace('\n', ' ').strip()
+
+    elif atype == 'ChangeListAction':
+        r['list_variable'] = action.get('ListVariableName', '')
+        r['value'] = str(action.get('ContainedValue', '')).strip()
+        r['list_change_type'] = action.get('Type', '')
+
+    elif atype in ('NanoflowCallAction',):
+        nf_call = action.get('NanoflowCall', {})
+        if isinstance(nf_call, dict):
+            r['nanoflow'] = nf_call.get('Nanoflow', '')
+        r['variable'] = action.get('VariableName', '')
 
     return r
 
@@ -197,6 +235,9 @@ def _analyze_loop(obj: dict) -> dict:
             if isinstance(action, dict):
                 analyzed = _analyze_action(action)
                 analyzed['caption'] = lo.get('Caption', '')
+                error_handling = lo.get('ErrorHandlingType', 'Rollback')
+                if error_handling and error_handling != 'Rollback':
+                    analyzed['error_handling'] = error_handling
                 loop_actions.append(analyzed)
         elif lt in ('Microflows$ExclusiveSplit', 'Microflows$InheritanceSplit'):
             loop_splits.append(_analyze_split(lo))
@@ -292,6 +333,9 @@ def _analyze_microflow(doc: dict) -> dict:
                 analyzed = _analyze_action(action)
                 analyzed['caption'] = obj.get('Caption', '')
                 analyzed['documentation'] = obj.get('Documentation', '')
+                error_handling = obj.get('ErrorHandlingType', 'Rollback')
+                if error_handling and error_handling != 'Rollback':
+                    analyzed['error_handling'] = error_handling
                 actions.append(analyzed)
         elif otype in ('Microflows$ExclusiveSplit', 'Microflows$InheritanceSplit'):
             splits.append(_analyze_split(obj))
@@ -461,6 +505,23 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
         details.append(f"bericht: \"{a['message']}\"{level}")
     if a.get('page'):
         details.append(f"pagina: `{a['page']}`")
+    if a.get('expression'):
+        details.append(f"expressie: `{a['expression']}`")
+    if a.get('list_operation'):
+        details.append(f"operatie: {a['list_operation']}")
+    if a.get('list_variable'):
+        details.append(f"lijst: `{a['list_variable']}`")
+    if a.get('aggregate_function'):
+        attr = a.get('aggregate_attribute', '')
+        details.append(f"{a['aggregate_function']}(`{attr}`)")
+    if a.get('variable_type'):
+        details.append(f"type: {a['variable_type']}")
+    if a.get('list_change_type'):
+        details.append(f"lijstoperatie: {a['list_change_type']}")
+    if a.get('nanoflow'):
+        details.append(f"nanoflow: `{a['nanoflow']}`")
+    if a.get('error_handling'):
+        details.append(f"⚠ errorHandling: {a['error_handling']}")
 
     detail_str = '  |  '.join(details)
     lines.append(f"{prefix}- {label}{' — ' + detail_str if detail_str else ''}")

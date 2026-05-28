@@ -1,13 +1,17 @@
 import asyncio
+import logging
 import os
 import base64
 import hmac
 import hashlib
 import time
 import re
+from pathlib import Path
 import subprocess
 import tempfile
 import shutil
+
+logger = logging.getLogger(__name__)
 
 import httpx
 import litellm
@@ -24,8 +28,13 @@ LLM_MODEL = os.environ["LLM_MODEL"]
 TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 ALLOWED_APP_IDS = set(os.environ["ALLOWED_APP_IDS"].split(","))
+MX_GIT_BASE_URL = os.environ.get("MX_GIT_BASE_URL", "https://git.api.mendix.com")
+MX_LOCAL_REPO = os.environ.get("MX_LOCAL_REPO", "")
+if not ALLOWED_APP_IDS or "" in ALLOWED_APP_IDS:
+    raise RuntimeError("ALLOWED_APP_IDS must be a non-empty comma-separated list of GUIDs")
 
 DIFF_CHAR_LIMIT = 15_000
+MAX_FILES_PER_DIFF = 50
 
 
 def verify_signature(webhook_id: str, timestamp: str, signature_header: str, body: bytes) -> None:
@@ -42,7 +51,8 @@ def verify_signature(webhook_id: str, timestamp: str, signature_header: str, bod
     expected_mac = hmac.new(WEBHOOK_SECRET.encode(), msg, hashlib.sha256).digest()
     expected_sig = "v1," + base64.b64encode(expected_mac).decode()
 
-    if not hmac.compare_digest(signature_header, expected_sig):
+    sigs = [s.strip() for s in signature_header.split() if s.strip()]
+    if not any(hmac.compare_digest(sig, expected_sig) for sig in sigs):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
 
@@ -81,13 +91,16 @@ def _parse_mxunit_at(cwd: str, ref: str, path: str) -> dict | None:
             check=True, capture_output=True,
         )
         return summarize(parse_bytes(result.stdout))
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to parse %s at %s: %s", path, ref, e)
         return None
 
 
 def _format_mxunit_change(path: str, before: dict | None, after: dict | None) -> str:
     """Formatteer een voor/na vergelijking van één .mxunit bestand als markdown."""
     filename = path.split('/')[-1]
+    if before is None and after is None:
+        return f"### Hernoemd/onleesbaar: `{filename}`\n_(niet parseerbaar)_"
     if before is None:
         label = f"### Toegevoegd: `{filename}`"
         return f"{label}\n{format_summary(after)}"
@@ -103,13 +116,18 @@ def get_diff(app_id: str, before: str, after: str) -> str:
     Clone de Mendix repo, parseer gewijzigde .mxunit bestanden naar leesbare markdown,
     en voeg tekst-diffs toe voor java/js/scss bestanden. Gecapt op DIFF_CHAR_LIMIT tekens.
     """
-    repo_url = f"https://pat:{MX_PAT}@git.api.mendix.com/{app_id}.git"
+    if MX_LOCAL_REPO:
+        repo_url = f"file://{MX_LOCAL_REPO}"
+    else:
+        repo_url = f"{MX_GIT_BASE_URL}/{app_id}.git"
+    auth_header = "Authorization: Basic " + base64.b64encode(f"pat:{MX_PAT}".encode()).decode()
     tmp_dir = tempfile.mkdtemp()
     try:
-        subprocess.run(
-            ["git", "clone", "--depth", "2", repo_url, tmp_dir],
-            check=True, capture_output=True,
-        )
+        clone_args = ["git", "clone", "--depth", "2", "--no-single-branch"]
+        if not MX_LOCAL_REPO and MX_GIT_BASE_URL.startswith("https://"):
+            clone_args += ["-c", f"http.{MX_GIT_BASE_URL}/.extraHeader={auth_header}"]
+        clone_args += [repo_url, tmp_dir]
+        subprocess.run(clone_args, check=True, capture_output=True, timeout=60)
 
         # Lijst van gewijzigde bestanden met status (A=added, M=modified, D=deleted)
         name_status = _git(
@@ -121,17 +139,35 @@ def get_diff(app_id: str, before: str, after: str) -> str:
             return "Geen wijzigingen gevonden."
 
         sections: list[str] = []
+        processed = 0
 
         for line in name_status.splitlines():
-            parts = line.split('\t', 1)
-            if len(parts) != 2:
+            if processed >= MAX_FILES_PER_DIFF:
+                sections.append(f"_(meer dan {MAX_FILES_PER_DIFF} bestanden gewijzigd, rest overgeslagen)_")
+                break
+
+            parts = line.split('\t')
+            if len(parts) < 2:
                 continue
-            change_type, path = parts[0].strip(), parts[1].strip()
+            change_type = parts[0].strip()
+
+            # Renames: R<percent><TAB>old_path<TAB>new_path
+            if change_type.startswith('R') and len(parts) == 3:
+                old_path, new_path = parts[1].strip(), parts[2].strip()
+                if new_path.endswith('.mxunit'):
+                    before_doc = _parse_mxunit_at(tmp_dir, before, old_path)
+                    after_doc = _parse_mxunit_at(tmp_dir, after, new_path)
+                    sections.append(_format_mxunit_change(new_path, before_doc, after_doc))
+                    processed += 1
+                continue
+
+            path = parts[1].strip()
 
             if path.endswith('.mxunit'):
                 before_doc = _parse_mxunit_at(tmp_dir, before, path) if change_type != 'A' else None
                 after_doc = _parse_mxunit_at(tmp_dir, after, path) if change_type != 'D' else None
                 sections.append(_format_mxunit_change(path, before_doc, after_doc))
+                processed += 1
 
             elif any(path.startswith(p) for p in ('javasource/', 'javascriptsource/', 'themesource/')):
                 diff = _git(
@@ -140,6 +176,7 @@ def get_diff(app_id: str, before: str, after: str) -> str:
                 ).stdout
                 if diff.strip():
                     sections.append(f"### Tekstwijziging: `{path}`\n```\n{diff[:3000]}\n```")
+                processed += 1
 
         return '\n\n'.join(sections)[:DIFF_CHAR_LIMIT]
 
@@ -152,14 +189,14 @@ def get_diff(app_id: str, before: str, after: str) -> str:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-SYSTEM_PROMPT = (
-    "You are a Mendix model reviewer. Review the provided git diff of Mendix model contents. "
-    "Focus on: naming conventions (PascalCase for microflows, camelCase for variables), "
-    "microflow complexity (avoid deeply nested logic, prefer sub-microflows), "
-    "domain model changes (check entity names, associations, and data types), "
-    "and security issues (input validation, access rules). "
-    "Be concise. Max 400 words. Use bullet points."
-)
+_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
+
+if not _SYSTEM_PROMPT_PATH.exists():
+    raise RuntimeError(f"System prompt bestand niet gevonden: {_SYSTEM_PROMPT_PATH}")
+
+
+def _load_system_prompt() -> str:
+    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
 async def review_diff(diff: str) -> str:
@@ -169,7 +206,7 @@ async def review_diff(diff: str) -> str:
             model=LLM_MODEL,
             max_tokens=600,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _load_system_prompt()},
                 {"role": "user", "content": f"Review this Mendix commit diff:\n\n{diff}"},
             ],
         )

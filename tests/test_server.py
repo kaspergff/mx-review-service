@@ -318,3 +318,32 @@ def test_review_endpoint_missing_signature_headers():
     }).encode()
     response = client.post("/review", content=body, headers={"content-type": "application/json"})
     assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# _load_system_prompt tests
+# ---------------------------------------------------------------------------
+
+def test_load_system_prompt_returns_file_content(tmp_path, monkeypatch):
+    """_load_system_prompt leest het bestand en geeft de inhoud terug."""
+    prompt_file = tmp_path / "system_prompt.md"
+    prompt_file.write_text("Je bent een reviewer.\n\nFocus op security.")
+
+    import server as _server
+    monkeypatch.setattr(_server, "_SYSTEM_PROMPT_PATH", prompt_file)
+
+    from server import _load_system_prompt
+    result = _load_system_prompt()
+    assert result == "Je bent een reviewer.\n\nFocus op security."
+
+
+def test_load_system_prompt_missing_file_raises(tmp_path, monkeypatch):
+    """_load_system_prompt gooit FileNotFoundError als het bestand niet bestaat."""
+    missing = tmp_path / "does_not_exist.md"
+
+    import server as _server
+    monkeypatch.setattr(_server, "_SYSTEM_PROMPT_PATH", missing)
+
+    from server import _load_system_prompt
+    with pytest.raises(FileNotFoundError):
+        _load_system_prompt()

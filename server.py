@@ -44,6 +44,29 @@ def verify_signature(webhook_id: str, timestamp: str, signature_header: str, bod
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
 
 
+class ReviewRequest(BaseModel):
+    appId: str
+    before: str
+    after: str
+    branchName: str
+    authorName: str
+    commitMessage: str
+
+    @field_validator("appId")
+    @classmethod
+    def app_id_allowed(cls, v: str) -> str:
+        if v not in ALLOWED_APP_IDS:
+            raise ValueError(f"appId '{v}' is not in ALLOWED_APP_IDS")
+        return v
+
+    @field_validator("before", "after")
+    @classmethod
+    def valid_commit_hash(cls, v: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{40}", v):
+            raise ValueError("Commit hash must be exactly 40 lowercase hex characters")
+        return v
+
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 

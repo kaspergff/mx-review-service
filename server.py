@@ -207,7 +207,7 @@ async def review(request: Request) -> JSONResponse:
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     diff = await loop.run_in_executor(None, get_diff, payload.appId, payload.before, payload.after)
 
     review_text = await review_diff(diff)

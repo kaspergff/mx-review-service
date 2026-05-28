@@ -173,11 +173,32 @@ def _analyze_action(action: dict) -> dict:
             op_type = op.get('$Type', '').replace('Microflows$', '')
             r['list_operation'] = op_type
             r['list_variable'] = action.get('ListVariableName', '')
-            # Filter/Find: expression staat op de operatie
-            expr = op.get('Expression', '').replace('\n', ' ').strip()
+
+            # Filter/Find: expression kan op de operatie zelf staan of genest zijn
+            expr = (op.get('Expression', '')
+                    or op.get('FilterExpression', '')
+                    or op.get('FindExpression', '')).replace('\n', ' ').strip()
             if expr:
                 r['expression'] = expr
-            r['variable'] = op.get('OutputVariableName', action.get('VariableName', ''))
+
+            # Sort: sorteersleutels
+            sort_items = _filter(op.get('SortItems', []) or op.get('SortingList', []))
+            if sort_items:
+                r['sort_keys'] = [
+                    f"{si.get('Attribute', si.get('SortAttribute', '?')).split('.')[-1]} {'↓' if si.get('Ascending', True) else '↑'}"
+                    for si in sort_items
+                ]
+
+            # Head/Tail: count
+            count = op.get('Count', op.get('HeadCount', op.get('TailCount', '')))
+            if count:
+                r['count'] = count
+
+            # Output variabele — staat op operatie OF op actie niveau
+            r['variable'] = (op.get('OutputVariableName', '')
+                             or op.get('VariableName', '')
+                             or action.get('VariableName', '')
+                             or action.get('ResultVariableName', ''))
 
     elif atype == 'AggregateListAction':
         r['list_variable'] = action.get('ListVariableName', '')
@@ -508,9 +529,22 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
     if a.get('expression'):
         details.append(f"expressie: `{a['expression']}`")
     if a.get('list_operation'):
-        details.append(f"operatie: {a['list_operation']}")
+        op_labels = {
+            'FilterListOperation': 'filter',
+            'FindListOperation': 'find',
+            'SortListOperation': 'sort',
+            'HeadListOperation': 'head',
+            'TailListOperation': 'tail',
+            'ReduceListOperation': 'reduce',
+        }
+        op_label = op_labels.get(a['list_operation'], a['list_operation'])
+        details.append(f"list {op_label}")
     if a.get('list_variable'):
-        details.append(f"lijst: `{a['list_variable']}`")
+        details.append(f"op `{a['list_variable']}`")
+    if a.get('sort_keys'):
+        details.append(f"by {', '.join(a['sort_keys'])}")
+    if a.get('count') is not None:
+        details.append(f"n={a['count']}")
     if a.get('aggregate_function'):
         attr = a.get('aggregate_attribute', '')
         details.append(f"{a['aggregate_function']}(`{attr}`)")

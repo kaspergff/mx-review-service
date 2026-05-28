@@ -93,21 +93,84 @@ def test_review_request_invalid_commit_hash():
 _VALID_APP_ID = next(iter(__import__('server').ALLOWED_APP_IDS))
 
 
-def test_get_diff_returns_truncated_output():
-    long_output = "x" * 20_000
-    mock_result = MagicMock()
-    mock_result.stdout = long_output
+def test_get_diff_returns_parsed_markdown():
+    """get_diff moet leesbare markdown teruggeven, geen ruwe binary diff."""
+    # clone: geen output nodig
+    clone_result = MagicMock()
+    clone_result.stdout = b""
 
-    with patch("server.subprocess.run", return_value=mock_result) as mock_run:
+    # name-status: één gewijzigd .mxunit bestand
+    name_status_result = MagicMock()
+    name_status_result.stdout = "M\tmprcontents/ab/cd/abcd1234-0000-0000-0000-000000000000.mxunit"
+
+    # git show voor-versie: minimale geldige BSON voor een microflow
+    import bson as _bson
+    before_bson = _bson.encode({
+        "$Type": "Microflows$Microflow",
+        "Name": "ACT_Test",
+        "MicroflowReturnType": {"$Type": "DataTypes$VoidType"},
+        "MicroflowParameters": [],
+        "ObjectCollection": {"Objects": []},
+        "AllowedModuleRoles": [],
+        "Documentation": "",
+    })
+    before_result = MagicMock()
+    before_result.stdout = before_bson
+
+    # git show na-versie: zelfde
+    after_result = MagicMock()
+    after_result.stdout = before_bson
+
+    results = iter([clone_result, name_status_result, before_result, after_result])
+
+    def fake_run(args, **kwargs):
+        return next(results)
+
+    with patch("server.subprocess.run", side_effect=fake_run) as mock_run:
         with patch("server.tempfile.mkdtemp", return_value="/tmp/fake"):
             with patch("server.shutil.rmtree"):
                 result = get_diff(_VALID_APP_ID, "a" * 40, "b" * 40)
 
-    assert len(result) == 15_000
-    # Verify no shell=True was used
+    assert "ACT_Test" in result
+    assert "Gewijzigd" in result
     for call in mock_run.call_args_list:
         _, kwargs = call
         assert not kwargs.get("shell", False)
+
+
+def test_get_diff_truncates_at_limit():
+    """Output mag niet groter zijn dan DIFF_CHAR_LIMIT."""
+    import bson as _bson
+    big_bson = _bson.encode({
+        "$Type": "Microflows$Microflow",
+        "Name": "A" * 500,
+        "MicroflowReturnType": {"$Type": "DataTypes$VoidType"},
+        "MicroflowParameters": [],
+        "ObjectCollection": {"Objects": []},
+        "AllowedModuleRoles": [],
+        "Documentation": "x" * 1000,
+    })
+
+    entries = "\n".join(
+        f"M\tmprcontents/ab/cd/abcd{i:04d}-0000-0000-0000-000000000000.mxunit"
+        for i in range(30)
+    )
+
+    def fake_run(args, **kwargs):
+        r = MagicMock()
+        # name-status call gebruikt text=True en verwacht str stdout
+        if kwargs.get("text"):
+            r.stdout = entries
+        else:
+            r.stdout = big_bson
+        return r
+
+    with patch("server.subprocess.run", side_effect=fake_run):
+        with patch("server.tempfile.mkdtemp", return_value="/tmp/fake"):
+            with patch("server.shutil.rmtree"):
+                result = get_diff(_VALID_APP_ID, "a" * 40, "b" * 40)
+
+    assert len(result) <= 15_000
 
 
 def test_get_diff_subprocess_error_raises():

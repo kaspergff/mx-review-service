@@ -11,6 +11,7 @@ import shutil
 
 import httpx
 import litellm
+from mendix.parser import parse_bytes, summarize, format_summary
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
@@ -68,24 +69,80 @@ class ReviewRequest(BaseModel):
         return v
 
 
+def _git(args: list[str], cwd: str, **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", cwd] + args, check=True, capture_output=True, **kwargs)
+
+
+def _parse_mxunit_at(cwd: str, ref: str, path: str) -> dict | None:
+    """Parseer een .mxunit bestand op een specifiek git commit ref. Geeft None bij fout."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "show", f"{ref}:{path}"],
+            check=True, capture_output=True,
+        )
+        return summarize(parse_bytes(result.stdout))
+    except Exception:
+        return None
+
+
+def _format_mxunit_change(path: str, before: dict | None, after: dict | None) -> str:
+    """Formatteer een voor/na vergelijking van één .mxunit bestand als markdown."""
+    filename = path.split('/')[-1]
+    if before is None:
+        label = f"### Toegevoegd: `{filename}`"
+        return f"{label}\n{format_summary(after)}"
+    if after is None:
+        label = f"### Verwijderd: `{filename}`"
+        return f"{label}\n{format_summary(before)}"
+    label = f"### Gewijzigd: `{filename}`"
+    return f"{label}\n**Voor:**\n{format_summary(before)}\n\n**Na:**\n{format_summary(after)}"
+
+
 def get_diff(app_id: str, before: str, after: str) -> str:
-    """Clone repo and return mprcontents diff, capped at DIFF_CHAR_LIMIT."""
+    """
+    Clone de Mendix repo, parseer gewijzigde .mxunit bestanden naar leesbare markdown,
+    en voeg tekst-diffs toe voor java/js/scss bestanden. Gecapt op DIFF_CHAR_LIMIT tekens.
+    """
     repo_url = f"https://pat:{MX_PAT}@git.api.mendix.com/{app_id}.git"
     tmp_dir = tempfile.mkdtemp()
     try:
         subprocess.run(
             ["git", "clone", "--depth", "2", repo_url, tmp_dir],
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True,
         )
-        result = subprocess.run(
-            ["git", "-C", tmp_dir, "diff", f"{before}..{after}", "--", "mprcontents/"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout[:DIFF_CHAR_LIMIT]
+
+        # Lijst van gewijzigde bestanden met status (A=added, M=modified, D=deleted)
+        name_status = _git(
+            ["diff", "--name-status", f"{before}..{after}"],
+            tmp_dir, text=True,
+        ).stdout.strip()
+
+        if not name_status:
+            return "Geen wijzigingen gevonden."
+
+        sections: list[str] = []
+
+        for line in name_status.splitlines():
+            parts = line.split('\t', 1)
+            if len(parts) != 2:
+                continue
+            change_type, path = parts[0].strip(), parts[1].strip()
+
+            if path.endswith('.mxunit'):
+                before_doc = _parse_mxunit_at(tmp_dir, before, path) if change_type != 'A' else None
+                after_doc = _parse_mxunit_at(tmp_dir, after, path) if change_type != 'D' else None
+                sections.append(_format_mxunit_change(path, before_doc, after_doc))
+
+            elif any(path.startswith(p) for p in ('javasource/', 'javascriptsource/', 'themesource/')):
+                diff = _git(
+                    ["diff", f"{before}..{after}", "--", path],
+                    tmp_dir, text=True,
+                ).stdout
+                if diff.strip():
+                    sections.append(f"### Tekstwijziging: `{path}`\n```\n{diff[:3000]}\n```")
+
+        return '\n\n'.join(sections)[:DIFF_CHAR_LIMIT]
+
     except subprocess.CalledProcessError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

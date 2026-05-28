@@ -86,10 +86,10 @@ def get_diff(app_id: str, before: str, after: str) -> str:
             text=True,
         )
         return result.stdout[:DIFF_CHAR_LIMIT]
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Git operation failed: {e.stderr}",
+            detail="Git operation failed",
         )
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

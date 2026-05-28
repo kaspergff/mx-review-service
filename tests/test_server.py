@@ -143,3 +143,51 @@ async def test_review_diff_raises_on_api_error():
         with pytest.raises(HTTPException) as exc:
             await review_diff("some diff text")
     assert exc.value.status_code == 502
+
+
+TEAMS_URL = "https://teams.example.com/webhook"
+
+
+@pytest.mark.asyncio
+async def test_post_to_teams_sends_adaptive_card():
+    import server
+    original_url = server.TEAMS_WEBHOOK_URL
+    server.TEAMS_WEBHOOK_URL = TEAMS_URL
+
+    with respx.mock:
+        route = respx.post(TEAMS_URL).mock(return_value=_httpx.Response(200, text="1"))
+        from server import post_to_teams
+        await post_to_teams(
+            author="Alice",
+            commit_hash="abc123",
+            commit_message="Fix bug",
+            branch="main",
+            review="- Looks good",
+        )
+        assert route.called
+        body = route.calls[0].request.content
+        import json
+        card = json.loads(body)
+        assert card["type"] == "message"
+        facts = card["attachments"][0]["content"]["body"][0]["facts"]
+        fact_titles = [f["title"] for f in facts]
+        assert "Author" in fact_titles
+        assert "Commit" in fact_titles
+
+    server.TEAMS_WEBHOOK_URL = original_url
+
+
+@pytest.mark.asyncio
+async def test_post_to_teams_raises_on_failure():
+    import server
+    original_url = server.TEAMS_WEBHOOK_URL
+    server.TEAMS_WEBHOOK_URL = TEAMS_URL
+
+    with respx.mock:
+        respx.post(TEAMS_URL).mock(return_value=_httpx.Response(400, text="bad"))
+        from server import post_to_teams
+        with pytest.raises(HTTPException) as exc:
+            await post_to_teams("A", "abc", "msg", "main", "review")
+        assert exc.value.status_code == 502
+
+    server.TEAMS_WEBHOOK_URL = original_url

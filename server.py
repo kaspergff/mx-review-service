@@ -128,6 +128,58 @@ async def review_diff(diff: str) -> str:
     return response.json()["content"][0]["text"]
 
 
+async def post_to_teams(
+    author: str,
+    commit_hash: str,
+    commit_message: str,
+    branch: str,
+    review: str,
+) -> None:
+    """Post an Adaptive Card to the configured Teams webhook."""
+    card = {
+        "type": "message",
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.4",
+                    "body": [
+                        {
+                            "type": "FactSet",
+                            "facts": [
+                                {"title": "Author", "value": author},
+                                {"title": "Branch", "value": branch},
+                                {"title": "Commit", "value": commit_hash[:12]},
+                                {"title": "Message", "value": commit_message},
+                            ],
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": "**Code Review**",
+                            "weight": "Bolder",
+                        },
+                        {
+                            "type": "TextBlock",
+                            "text": review,
+                            "wrap": True,
+                        },
+                    ],
+                },
+            }
+        ],
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(TEAMS_WEBHOOK_URL, json=card)
+
+    if response.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Teams webhook error {response.status_code}",
+        )
+
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 

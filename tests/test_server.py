@@ -6,11 +6,15 @@ from unittest.mock import patch, MagicMock
 import subprocess
 
 import pytest
+import respx
+import httpx as _httpx
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest, get_diff
+
+CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 
 client = TestClient(app)
 
@@ -116,4 +120,26 @@ def test_get_diff_subprocess_error_raises():
             with patch("server.shutil.rmtree"):
                 with pytest.raises(HTTPException) as exc:
                     get_diff(_VALID_APP_ID, "a" * 40, "b" * 40)
+    assert exc.value.status_code == 502
+
+
+@pytest.mark.asyncio
+async def test_review_diff_returns_text():
+    fake_response = {
+        "content": [{"type": "text", "text": "- Good naming\n- No issues found"}]
+    }
+    with respx.mock:
+        respx.post(CLAUDE_API_URL).mock(return_value=_httpx.Response(200, json=fake_response))
+        from server import review_diff
+        result = await review_diff("some diff text")
+    assert result == "- Good naming\n- No issues found"
+
+
+@pytest.mark.asyncio
+async def test_review_diff_raises_on_api_error():
+    with respx.mock:
+        respx.post(CLAUDE_API_URL).mock(return_value=_httpx.Response(500, json={"error": "oops"}))
+        from server import review_diff
+        with pytest.raises(HTTPException) as exc:
+            await review_diff("some diff text")
     assert exc.value.status_code == 502

@@ -94,6 +94,40 @@ def get_diff(app_id: str, before: str, after: str) -> str:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+CLAUDE_SYSTEM_PROMPT = (
+    "You are a Mendix model reviewer. Review the provided git diff of Mendix model contents. "
+    "Focus on: naming conventions (PascalCase for microflows, camelCase for variables), "
+    "microflow complexity (avoid deeply nested logic, prefer sub-microflows), "
+    "domain model changes (check entity names, associations, and data types), "
+    "and security issues (input validation, access rules). "
+    "Be concise. Max 400 words. Use bullet points."
+)
+
+
+async def review_diff(diff: str) -> str:
+    """Send diff to Claude and return the review text."""
+    payload = {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 600,
+        "system": CLAUDE_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": f"Review this Mendix commit diff:\n\n{diff}"}],
+    }
+    headers = {
+        "x-api-key": CLAUDE_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Claude API error {response.status_code}",
+        )
+    return response.json()["content"][0]["text"]
+
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 

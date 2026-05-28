@@ -67,6 +67,33 @@ class ReviewRequest(BaseModel):
         return v
 
 
+def get_diff(app_id: str, before: str, after: str) -> str:
+    """Clone repo and return mprcontents diff, capped at DIFF_CHAR_LIMIT."""
+    repo_url = f"https://pat:{MX_PAT}@git.api.mendix.com/{app_id}.git"
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        subprocess.run(
+            ["git", "clone", "--depth", "2", repo_url, tmp_dir],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = subprocess.run(
+            ["git", "-C", tmp_dir, "diff", f"{before}..{after}", "--", "mprcontents/"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout[:DIFF_CHAR_LIMIT]
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Git operation failed: {e.stderr}",
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 

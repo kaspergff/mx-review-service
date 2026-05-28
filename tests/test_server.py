@@ -2,13 +2,15 @@ import base64
 import hashlib
 import hmac
 import time
+from unittest.mock import patch, MagicMock
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest
+from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest, get_diff
 
 client = TestClient(app)
 
@@ -86,3 +88,32 @@ def test_review_request_invalid_commit_hash():
             authorName="Alice",
             commitMessage="Fix bug",
         )
+
+
+_VALID_APP_ID = next(iter(__import__('server').ALLOWED_APP_IDS))
+
+
+def test_get_diff_returns_truncated_output():
+    long_output = "x" * 20_000
+    mock_result = MagicMock()
+    mock_result.stdout = long_output
+
+    with patch("server.subprocess.run", return_value=mock_result) as mock_run:
+        with patch("server.tempfile.mkdtemp", return_value="/tmp/fake"):
+            with patch("server.shutil.rmtree"):
+                result = get_diff(_VALID_APP_ID, "a" * 40, "b" * 40)
+
+    assert len(result) == 15_000
+    # Verify no shell=True was used
+    for call in mock_run.call_args_list:
+        _, kwargs = call
+        assert not kwargs.get("shell", False)
+
+
+def test_get_diff_subprocess_error_raises():
+    with patch("server.subprocess.run", side_effect=subprocess.CalledProcessError(1, "git", stderr="clone failed")):
+        with patch("server.tempfile.mkdtemp", return_value="/tmp/fake"):
+            with patch("server.shutil.rmtree"):
+                with pytest.raises(HTTPException) as exc:
+                    get_diff(_VALID_APP_ID, "a" * 40, "b" * 40)
+    assert exc.value.status_code == 502

@@ -8,9 +8,9 @@ import re
 import subprocess
 import tempfile
 import shutil
-from typing import Any
 
 import httpx
+import litellm
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 MX_PAT = os.environ["MX_PAT"]
-CLAUDE_API_KEY = os.environ["CLAUDE_API_KEY"]
+LLM_MODEL = os.environ["LLM_MODEL"]
 TEAMS_WEBHOOK_URL = os.environ["TEAMS_WEBHOOK_URL"]
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 ALLOWED_APP_IDS = set(os.environ["ALLOWED_APP_IDS"].split(","))
@@ -95,7 +95,7 @@ def get_diff(app_id: str, before: str, after: str) -> str:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-CLAUDE_SYSTEM_PROMPT = (
+SYSTEM_PROMPT = (
     "You are a Mendix model reviewer. Review the provided git diff of Mendix model contents. "
     "Focus on: naming conventions (PascalCase for microflows, camelCase for variables), "
     "microflow complexity (avoid deeply nested logic, prefer sub-microflows), "
@@ -106,27 +106,22 @@ CLAUDE_SYSTEM_PROMPT = (
 
 
 async def review_diff(diff: str) -> str:
-    """Send diff to Claude and return the review text."""
-    payload = {
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 600,
-        "system": CLAUDE_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": f"Review this Mendix commit diff:\n\n{diff}"}],
-    }
-    headers = {
-        "x-api-key": CLAUDE_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
-
-    if response.status_code != 200:
+    """Send diff to the configured LLM and return the review text."""
+    try:
+        response = await litellm.acompletion(
+            model=LLM_MODEL,
+            max_tokens=600,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Review this Mendix commit diff:\n\n{diff}"},
+            ],
+        )
+        return response.choices[0].message.content
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Claude API error {response.status_code}",
+            detail=f"LLM error: {e}",
         )
-    return response.json()["content"][0]["text"]
 
 
 async def post_to_teams(

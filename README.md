@@ -1,6 +1,6 @@
 # Mendix Commit Review Service
 
-Receives Mendix Pipeline webhooks, fetches the git diff, reviews it with Claude, and posts results to Microsoft Teams.
+Receives Mendix Pipeline webhooks, fetches the git diff, reviews it with an LLM of your choice (Claude, OpenAI, Gemini, Azure OpenAI, ...), and posts results to Microsoft Teams.
 
 ## Local Setup
 
@@ -23,10 +23,23 @@ uvicorn server:app --reload --port 8000
 | Variable | Description |
 |----------|-------------|
 | `MX_PAT` | Mendix Personal Access Token with repo read access |
-| `CLAUDE_API_KEY` | Anthropic API key (`sk-ant-...`) |
+| `LLM_MODEL` | Model string voor LiteLLM (zie voorbeelden hieronder) |
 | `TEAMS_WEBHOOK_URL` | Incoming Webhook URL from a Teams channel connector |
 | `WEBHOOK_SECRET` | Shared secret configured in the Mendix Pipeline POST Request step |
 | `ALLOWED_APP_IDS` | Comma-separated list of allowed Mendix App GUIDs |
+
+### LLM provider kiezen
+
+Stel `LLM_MODEL` in en voeg de bijbehorende API key toe:
+
+| Provider | `LLM_MODEL` | API key env var |
+|----------|-------------|-----------------|
+| Anthropic Claude | `claude-sonnet-4-20250514` | `ANTHROPIC_API_KEY` |
+| OpenAI | `gpt-4o` | `OPENAI_API_KEY` |
+| Google Gemini | `gemini/gemini-1.5-pro` | `GEMINI_API_KEY` |
+| Azure OpenAI | `azure/gpt-4o` | `AZURE_API_KEY` + `AZURE_API_BASE` + `AZURE_API_VERSION` |
+
+Zie ook [LiteLLM providers](https://docs.litellm.ai/docs/providers) voor alle opties.
 
 ## Testing with curl
 

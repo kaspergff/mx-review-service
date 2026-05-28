@@ -6,15 +6,11 @@ from unittest.mock import patch, MagicMock
 import subprocess
 
 import pytest
-import respx
-import httpx as _httpx
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
 from pydantic import ValidationError
 
 from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest, get_diff
-
-CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 
 client = TestClient(app)
 
@@ -125,11 +121,14 @@ def test_get_diff_subprocess_error_raises():
 
 @pytest.mark.asyncio
 async def test_review_diff_returns_text():
-    fake_response = {
-        "content": [{"type": "text", "text": "- Good naming\n- No issues found"}]
-    }
-    with respx.mock:
-        respx.post(CLAUDE_API_URL).mock(return_value=_httpx.Response(200, json=fake_response))
+    fake_message = MagicMock()
+    fake_message.content = "- Good naming\n- No issues found"
+    fake_choice = MagicMock()
+    fake_choice.message = fake_message
+    fake_response = MagicMock()
+    fake_response.choices = [fake_choice]
+
+    with patch("litellm.acompletion", new_callable=AsyncMock, return_value=fake_response):
         from server import review_diff
         result = await review_diff("some diff text")
     assert result == "- Good naming\n- No issues found"
@@ -137,26 +136,34 @@ async def test_review_diff_returns_text():
 
 @pytest.mark.asyncio
 async def test_review_diff_raises_on_api_error():
-    with respx.mock:
-        respx.post(CLAUDE_API_URL).mock(return_value=_httpx.Response(500, json={"error": "oops"}))
+    with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=Exception("connection error")):
         from server import review_diff
         with pytest.raises(HTTPException) as exc:
             await review_diff("some diff text")
     assert exc.value.status_code == 502
 
 
-TEAMS_URL = "https://teams.example.com/webhook"
-
-
 @pytest.mark.asyncio
 async def test_post_to_teams_sends_adaptive_card():
-    import server
-    original_url = server.TEAMS_WEBHOOK_URL
-    server.TEAMS_WEBHOOK_URL = TEAMS_URL
+    import json
+    from server import post_to_teams
 
-    with respx.mock:
-        route = respx.post(TEAMS_URL).mock(return_value=_httpx.Response(200, text="1"))
-        from server import post_to_teams
+    captured = {}
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+
+    async def fake_post(url, json=None, **kwargs):
+        captured["url"] = url
+        captured["body"] = json
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = fake_post
+
+    with patch("server.httpx.AsyncClient", return_value=mock_client):
         await post_to_teams(
             author="Alice",
             commit_hash="abc123",
@@ -164,33 +171,34 @@ async def test_post_to_teams_sends_adaptive_card():
             branch="main",
             review="- Looks good",
         )
-        assert route.called
-        body = route.calls[0].request.content
-        import json
-        card = json.loads(body)
-        assert card["type"] == "message"
-        facts = card["attachments"][0]["content"]["body"][0]["facts"]
-        fact_titles = [f["title"] for f in facts]
-        assert "Author" in fact_titles
-        assert "Commit" in fact_titles
 
-    server.TEAMS_WEBHOOK_URL = original_url
+    card = captured["body"]
+    assert card["type"] == "message"
+    facts = card["attachments"][0]["content"]["body"][0]["facts"]
+    fact_titles = [f["title"] for f in facts]
+    assert "Author" in fact_titles
+    assert "Commit" in fact_titles
 
 
 @pytest.mark.asyncio
 async def test_post_to_teams_raises_on_failure():
-    import server
-    original_url = server.TEAMS_WEBHOOK_URL
-    server.TEAMS_WEBHOOK_URL = TEAMS_URL
+    from server import post_to_teams
 
-    with respx.mock:
-        respx.post(TEAMS_URL).mock(return_value=_httpx.Response(400, text="bad"))
-        from server import post_to_teams
+    mock_response = MagicMock()
+    mock_response.status_code = 400
+
+    async def fake_post(url, json=None, **kwargs):
+        return mock_response
+
+    mock_client = MagicMock()
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    mock_client.post = fake_post
+
+    with patch("server.httpx.AsyncClient", return_value=mock_client):
         with pytest.raises(HTTPException) as exc:
             await post_to_teams("A", "abc", "msg", "main", "review")
-        assert exc.value.status_code == 502
-
-    server.TEAMS_WEBHOOK_URL = original_url
+    assert exc.value.status_code == 502
 
 
 import asyncio

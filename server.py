@@ -1,3 +1,4 @@
+import asyncio
 import os
 import base64
 import hmac
@@ -186,3 +187,36 @@ app = FastAPI(docs_url=None, redoc_url=None)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/review")
+async def review(request: Request) -> JSONResponse:
+    body = await request.body()
+
+    webhook_id = request.headers.get("webhook-id")
+    webhook_timestamp = request.headers.get("webhook-timestamp")
+    webhook_signature = request.headers.get("webhook-signature")
+
+    if not all([webhook_id, webhook_timestamp, webhook_signature]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing signature headers")
+
+    verify_signature(webhook_id, webhook_timestamp, webhook_signature, body)
+
+    try:
+        payload = ReviewRequest.model_validate_json(body)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+
+    loop = asyncio.get_event_loop()
+    diff = await loop.run_in_executor(None, get_diff, payload.appId, payload.before, payload.after)
+
+    review_text = await review_diff(diff)
+    await post_to_teams(
+        author=payload.authorName,
+        commit_hash=payload.after,
+        commit_message=payload.commitMessage,
+        branch=payload.branchName,
+        review=review_text,
+    )
+
+    return JSONResponse({"status": "ok"})

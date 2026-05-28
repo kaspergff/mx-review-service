@@ -191,3 +191,59 @@ async def test_post_to_teams_raises_on_failure():
         assert exc.value.status_code == 502
 
     server.TEAMS_WEBHOOK_URL = original_url
+
+
+import asyncio
+from unittest.mock import AsyncMock
+
+VALID_APP_ID_STR = next(iter(__import__('server').ALLOWED_APP_IDS))
+
+
+def _make_review_headers(body: bytes) -> dict:
+    ts = str(int(time.time()))
+    wid = "test-id-1"
+    sig = _make_sig(wid, ts, body)
+    return {
+        "webhook-id": wid,
+        "webhook-timestamp": ts,
+        "webhook-signature": sig,
+        "content-type": "application/json",
+    }
+
+
+def test_review_endpoint_full_flow():
+    import json
+    body = json.dumps({
+        "appId": VALID_APP_ID_STR,
+        "before": "a" * 40,
+        "after": "b" * 40,
+        "branchName": "main",
+        "authorName": "Alice",
+        "commitMessage": "Fix bug",
+    }).encode()
+
+    with patch("server.get_diff", return_value="diff output") as mock_diff, \
+         patch("server.review_diff", new_callable=AsyncMock, return_value="- Looks good") as mock_review, \
+         patch("server.post_to_teams", new_callable=AsyncMock) as mock_teams:
+
+        response = client.post("/review", content=body, headers=_make_review_headers(body))
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    mock_diff.assert_called_once_with(VALID_APP_ID_STR, "a" * 40, "b" * 40)
+    mock_review.assert_called_once_with("diff output")
+    mock_teams.assert_called_once()
+
+
+def test_review_endpoint_missing_signature_headers():
+    import json
+    body = json.dumps({
+        "appId": VALID_APP_ID_STR,
+        "before": "a" * 40,
+        "after": "b" * 40,
+        "branchName": "main",
+        "authorName": "A",
+        "commitMessage": "m",
+    }).encode()
+    response = client.post("/review", content=body, headers={"content-type": "application/json"})
+    assert response.status_code == 401

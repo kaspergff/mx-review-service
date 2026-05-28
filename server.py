@@ -25,6 +25,25 @@ ALLOWED_APP_IDS = set(os.environ["ALLOWED_APP_IDS"].split(","))
 
 DIFF_CHAR_LIMIT = 15_000
 
+
+def verify_signature(webhook_id: str, timestamp: str, signature_header: str, body: bytes) -> None:
+    """Verify Mendix HMAC-SHA256 webhook signature and reject replays > 5 min."""
+    try:
+        ts = int(timestamp)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid timestamp")
+
+    if abs(time.time() - ts) > 300:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Request too old")
+
+    msg = f"{webhook_id}.{timestamp}.".encode() + body
+    expected_mac = hmac.new(WEBHOOK_SECRET.encode(), msg, hashlib.sha256).digest()
+    expected_sig = "v1," + base64.b64encode(expected_mac).decode()
+
+    if not hmac.compare_digest(signature_header, expected_sig):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 

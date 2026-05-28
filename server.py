@@ -21,7 +21,7 @@ load_dotenv()
 
 MX_PAT = os.environ["MX_PAT"]
 LLM_MODEL = os.environ["LLM_MODEL"]
-TEAMS_WEBHOOK_URL = os.environ["TEAMS_WEBHOOK_URL"]
+TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 ALLOWED_APP_IDS = set(os.environ["ALLOWED_APP_IDS"].split(","))
 
@@ -263,12 +263,15 @@ async def review(request: Request) -> JSONResponse:
     diff = await loop.run_in_executor(None, get_diff, payload.appId, payload.before, payload.after)
 
     review_text = await review_diff(diff)
-    await post_to_teams(
-        author=payload.authorName,
-        commit_hash=payload.after,
-        commit_message=payload.commitMessage,
-        branch=payload.branchName,
-        review=review_text,
-    )
+    if TEAMS_WEBHOOK_URL:
+        await post_to_teams(
+            author=payload.authorName,
+            commit_hash=payload.after,
+            commit_message=payload.commitMessage,
+            branch=payload.branchName,
+            review=review_text,
+        )
+    else:
+        print(f"[review] author={payload.authorName} branch={payload.branchName} commit={payload.after[:12]}\n{review_text}")
 
     return JSONResponse({"status": "ok"})

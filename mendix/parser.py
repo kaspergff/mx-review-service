@@ -62,8 +62,13 @@ def _filter(lst: list) -> list:
     return [i for i in lst if isinstance(i, dict)]
 
 
+MAX_BSON_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
 def parse_bytes(data: bytes) -> dict:
     """Parseer raw .mxunit bytes naar een geserialiseerd Python dict."""
+    if len(data) > MAX_BSON_SIZE:
+        raise ValueError(f"BSON input too large: {len(data)} bytes (max {MAX_BSON_SIZE})")
     return _bson_to_serializable(bson.decode(data))
 
 
@@ -484,6 +489,13 @@ def summarize(doc: dict) -> dict:
 # Markdown formatter
 # ---------------------------------------------------------------------------
 
+def _sanitize(value: str, max_len: int = 200) -> str:
+    """Truncate and remove backticks/newlines that could break markdown structure."""
+    if not isinstance(value, str):
+        value = str(value)
+    return value.replace('`', "'").replace('\n', ' ').replace('\r', '')[:max_len]
+
+
 def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
     """Formatteer één actie als markdown-regels."""
     atype = a.get('type', '?')
@@ -501,15 +513,15 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
     if a.get('entity'):
         details.append(f"entity: `{a['entity']}`")
     if a.get('xpath'):
-        details.append(f"xpath: `{a['xpath']}`")
+        details.append(f"xpath: `{_sanitize(a['xpath'])}`")
     if a.get('single_object'):
         details.append('→ eerste object')
     if a.get('variable'):
-        details.append(f"→ `{a['variable']}`")
+        details.append(f"→ `{_sanitize(a['variable'])}`")
     if a.get('microflow'):
-        details.append(f"roept aan: `{a['microflow']}`")
+        details.append(f"roept aan: `{_sanitize(a['microflow'])}`")
     if a.get('java_action'):
-        details.append(f"java: `{a['java_action']}`")
+        details.append(f"java: `{_sanitize(a['java_action'])}`")
     commit = str(a.get('commit', '') or '')
     if commit and commit not in ('No', 'False', 'None', ''):
         details.append(f"commit: {commit}")
@@ -518,16 +530,16 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
     if a.get('refresh_in_client'):
         details.append('refresh')
     if a.get('http_method') and a.get('url'):
-        details.append(f"{a['http_method']} `{a['url']}`")
+        details.append(f"{a['http_method']} `{_sanitize(a['url'])}`")
     if a.get('result_handling'):
         details.append(f"resultHandling: {a['result_handling']}")
     if a.get('message'):
         level = f" [{a['level']}]" if a.get('level') else ''
-        details.append(f"bericht: \"{a['message']}\"{level}")
+        details.append(f"bericht: \"{_sanitize(a['message'])}\"{level}")
     if a.get('page'):
         details.append(f"pagina: `{a['page']}`")
     if a.get('expression'):
-        details.append(f"expressie: `{a['expression']}`")
+        details.append(f"expressie: `{_sanitize(a['expression'])}`")
     if a.get('list_operation'):
         op_labels = {
             'FilterListOperation': 'filter',
@@ -540,7 +552,7 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
         op_label = op_labels.get(a['list_operation'], a['list_operation'])
         details.append(f"list {op_label}")
     if a.get('list_variable'):
-        details.append(f"op `{a['list_variable']}`")
+        details.append(f"op `{_sanitize(a['list_variable'])}`")
     if a.get('sort_keys'):
         details.append(f"by {', '.join(a['sort_keys'])}")
     if a.get('count') is not None:
@@ -553,7 +565,7 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
     if a.get('list_change_type'):
         details.append(f"lijstoperatie: {a['list_change_type']}")
     if a.get('nanoflow'):
-        details.append(f"nanoflow: `{a['nanoflow']}`")
+        details.append(f"nanoflow: `{_sanitize(a['nanoflow'])}`")
     if a.get('error_handling'):
         details.append(f"⚠ errorHandling: {a['error_handling']}")
 
@@ -562,12 +574,12 @@ def _fmt_action(a: dict, prefix: str = '  ') -> list[str]:
 
     # Call parameters
     for cp in a.get('call_params', []):
-        lines.append(f"{prefix}  - param `{cp['param']}` = `{cp['value']}`")
+        lines.append(f"{prefix}  - param `{_sanitize(cp['param'])}` = `{_sanitize(cp['value'])}`")
 
     # Member changes
     for mc in a.get('member_changes', []):
         t = f" [{mc['type']}]" if mc.get('type') else ''
-        lines.append(f"{prefix}  - `{mc['attribute']}`{t} = `{mc['value']}`")
+        lines.append(f"{prefix}  - `{_sanitize(mc['attribute'])}`{t} = `{_sanitize(mc['value'])}`")
 
     return lines
 
@@ -612,7 +624,7 @@ def format_summary(s: dict) -> str:
             for sp in s['splits']:
                 cap = sp.get('caption', '')
                 expr = sp.get('expression', '')
-                lines.append(f"  - {sp['type']}: `{expr}`" + (f" _{cap}_" if cap else ''))
+                lines.append(f"  - {sp['type']}: `{_sanitize(expr)}`" + (f" _{cap}_" if cap else ''))
 
         # Loops
         if s.get('loops'):
@@ -621,16 +633,16 @@ def format_summary(s: dict) -> str:
                 cap = lp.get('caption', '') or ''
                 over = lp.get('iterate_over', '?')
                 it = lp.get('iterator_name', '')
-                header = f"  - Loop over `{over}`"
+                header = f"  - Loop over `{_sanitize(over)}`"
                 if it:
-                    header += f" als `{it}`"
+                    header += f" als `{_sanitize(it)}`"
                 if cap:
                     header += f" _{cap}_"
                 lines.append(header)
                 for la in lp.get('actions', []):
                     lines.extend(_fmt_action(la, prefix='      '))
                 for ls in lp.get('splits', []):
-                    lines.append(f"      - Split: `{ls.get('expression', '')}`")
+                    lines.append(f"      - Split: `{_sanitize(ls.get('expression', ''))}`")
 
         # Flows (control flow)
         if s.get('flows'):
@@ -642,14 +654,14 @@ def format_summary(s: dict) -> str:
 
     # --- Domain model ---
     elif stype == 'DomainModel':
-        lines.append(f"**Domain model:** `{s.get('name', '')}`")
+        lines.append(f"**Domain model:** `{_sanitize(s.get('name', ''))}`")
         for e in s.get('entities', []):
-            gen = f" extends `{e['generalization']}`" if e.get('generalization') else ''
-            lines.append(f"\n**Entity** `{e['name']}`{gen}")
+            gen = f" extends `{_sanitize(e['generalization'])}`" if e.get('generalization') else ''
+            lines.append(f"\n**Entity** `{_sanitize(e['name'])}`{gen}")
             for a in e.get('attributes', []):
-                lines.append(f"  - `{a['name']}`: {a['type']}")
+                lines.append(f"  - `{_sanitize(a['name'])}`: {a['type']}")
             for v in e.get('validation_rules', []):
-                lines.append(f"  - Validatie `{v['attribute']}`: {v['rule']}")
+                lines.append(f"  - Validatie `{_sanitize(v['attribute'])}`: {v['rule']}")
             access = e.get('access_rules', [])
             if access:
                 for ar in access:
@@ -669,7 +681,7 @@ def format_summary(s: dict) -> str:
             if a.get('delete_parent'): delete_warnings.append('cascade→parent')
             if a.get('delete_child'):  delete_warnings.append('cascade→child')
             delete_str = f"  ⚠ delete: {', '.join(delete_warnings)}" if delete_warnings else ''
-            lines.append(f"- Associatie `{a['name']}` ({a['type']}): `{a['parent']}` → `{a['child']}`{delete_str}")
+            lines.append(f"- Associatie `{_sanitize(a['name'])}` ({a['type']}): `{_sanitize(a['parent'])}` → `{_sanitize(a['child'])}`{delete_str}")
 
     # --- Page ---
     elif 'Forms$Page' in stype:

@@ -23,15 +23,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MX_PAT = os.environ["MX_PAT"]
+MX_PAT = os.environ.get("MX_PAT", "")
 LLM_MODEL = os.environ["LLM_MODEL"]
 TEAMS_WEBHOOK_URL = os.environ.get("TEAMS_WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
-ALLOWED_APP_IDS = set(os.environ["ALLOWED_APP_IDS"].split(","))
+_raw_app_ids = os.environ.get("ALLOWED_APP_IDS", "")
+ALLOWED_APP_IDS: set[str] = set(_raw_app_ids.split(",")) - {""} if _raw_app_ids else set()
 MX_GIT_BASE_URL = os.environ.get("MX_GIT_BASE_URL", "https://git.api.mendix.com")
 MX_LOCAL_REPO = os.environ.get("MX_LOCAL_REPO", "")
-if not ALLOWED_APP_IDS or "" in ALLOWED_APP_IDS:
-    raise RuntimeError("ALLOWED_APP_IDS must be a non-empty comma-separated list of GUIDs")
 
 DIFF_CHAR_LIMIT = 15_000
 MAX_FILES_PER_DIFF = 50
@@ -67,7 +66,7 @@ class ReviewRequest(BaseModel):
     @field_validator("appId")
     @classmethod
     def app_id_allowed(cls, v: str) -> str:
-        if v not in ALLOWED_APP_IDS:
+        if ALLOWED_APP_IDS and v not in ALLOWED_APP_IDS:
             raise ValueError(f"appId '{v}' is not in ALLOWED_APP_IDS")
         return v
 
@@ -117,22 +116,25 @@ def get_diff(app_id: str, before: str, after: str) -> str:
     en voeg tekst-diffs toe voor java/js/scss bestanden. Gecapt op DIFF_CHAR_LIMIT tekens.
     """
     if MX_LOCAL_REPO:
-        repo_url = f"file://{MX_LOCAL_REPO}"
+        # Gebruik de lokale repo direct — geen clone nodig
+        work_dir = MX_LOCAL_REPO
+        tmp_dir = None
     else:
         repo_url = f"{MX_GIT_BASE_URL}/{app_id}.git"
-    auth_header = "Authorization: Basic " + base64.b64encode(f"pat:{MX_PAT}".encode()).decode()
-    tmp_dir = tempfile.mkdtemp()
-    try:
+        auth_header = "Authorization: Basic " + base64.b64encode(f"pat:{MX_PAT}".encode()).decode()
+        tmp_dir = tempfile.mkdtemp()
+        work_dir = tmp_dir
         clone_args = ["git", "clone", "--depth", "2", "--no-single-branch"]
-        if not MX_LOCAL_REPO and MX_GIT_BASE_URL.startswith("https://"):
+        if MX_GIT_BASE_URL.startswith("https://"):
             clone_args += ["-c", f"http.{MX_GIT_BASE_URL}/.extraHeader={auth_header}"]
         clone_args += [repo_url, tmp_dir]
         subprocess.run(clone_args, check=True, capture_output=True, timeout=60)
+    try:
 
         # Lijst van gewijzigde bestanden met status (A=added, M=modified, D=deleted)
         name_status = _git(
             ["diff", "--name-status", f"{before}..{after}"],
-            tmp_dir, text=True,
+            work_dir, text=True,
         ).stdout.strip()
 
         if not name_status:
@@ -155,8 +157,8 @@ def get_diff(app_id: str, before: str, after: str) -> str:
             if change_type.startswith('R') and len(parts) == 3:
                 old_path, new_path = parts[1].strip(), parts[2].strip()
                 if new_path.endswith('.mxunit'):
-                    before_doc = _parse_mxunit_at(tmp_dir, before, old_path)
-                    after_doc = _parse_mxunit_at(tmp_dir, after, new_path)
+                    before_doc = _parse_mxunit_at(work_dir, before, old_path)
+                    after_doc = _parse_mxunit_at(work_dir, after, new_path)
                     sections.append(_format_mxunit_change(new_path, before_doc, after_doc))
                     processed += 1
                 continue
@@ -164,15 +166,15 @@ def get_diff(app_id: str, before: str, after: str) -> str:
             path = parts[1].strip()
 
             if path.endswith('.mxunit'):
-                before_doc = _parse_mxunit_at(tmp_dir, before, path) if change_type != 'A' else None
-                after_doc = _parse_mxunit_at(tmp_dir, after, path) if change_type != 'D' else None
+                before_doc = _parse_mxunit_at(work_dir, before, path) if change_type != 'A' else None
+                after_doc = _parse_mxunit_at(work_dir, after, path) if change_type != 'D' else None
                 sections.append(_format_mxunit_change(path, before_doc, after_doc))
                 processed += 1
 
             elif any(path.startswith(p) for p in ('javasource/', 'javascriptsource/', 'themesource/')):
                 diff = _git(
                     ["diff", f"{before}..{after}", "--", path],
-                    tmp_dir, text=True,
+                    work_dir, text=True,
                 ).stdout
                 if diff.strip():
                     sections.append(f"### Tekstwijziging: `{path}`\n```\n{diff[:3000]}\n```")
@@ -186,7 +188,8 @@ def get_diff(app_id: str, before: str, after: str) -> str:
             detail="Git operation failed",
         )
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
@@ -311,4 +314,4 @@ async def review(request: Request) -> JSONResponse:
     else:
         print(f"[review] author={payload.authorName} branch={payload.branchName} commit={payload.after[:12]}\n{review_text}")
 
-    return JSONResponse({"status": "ok"})
+    return JSONResponse({"status": "ok", "review": review_text})

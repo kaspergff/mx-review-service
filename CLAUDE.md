@@ -1,3 +1,6 @@
+# CLAUDE conversation rules
+When reporting information to me, be extremely concise and sacrifice grammar for sake of concision.
+
 # mx-review-service
 
 FastAPI service die Mendix Pipeline webhooks ontvangt, de commit reviewt via een LLM, en het resultaat post naar Microsoft Teams.
@@ -52,8 +55,13 @@ POST /review
   → input validatie (appId allowlist, commit hash formaat)
   → git clone --depth 2 + parse gewijzigde .mxunit bestanden naar markdown
   → LLM review via LiteLLM
-  → Teams Adaptive Card
+  → Teams Adaptive Card  _(TODO: nog verder uitwerken)_
 ```
+
+## TODO
+
+- Parser coverage verifiëren: instrumenteer de fallback-branch in `summarize()` om onbekende `$Type` waarden te loggen, of schrijf een script dat alle unieke types uit een echte Mendix repo dumpt en vergelijkt met wat de parser afhandelt. Typen die nu alleen naam+type teruggeven: Scheduled Events, Published/Consumed REST & Web Services, Import/Export Mappings, Message Definitions, Document Templates, Workflows, OData Services.
+- Teams Adaptive Card verder uitwerken (zie request flow).
 
 ## mendix/parser.py
 

@@ -1,15 +1,17 @@
 import json
+import os
 import subprocess
 from typing import Any
 
 MXCLI = "mxcli"
+_TOOL_TIMEOUT = int(os.getenv("MXCLI_TOOL_TIMEOUT_SECONDS", "300").split("#")[0].strip())
 
 
 def get_diff(repo_path: str, mpr_path: str, before: str, after: str) -> str:
     try:
         result = subprocess.run(
             [MXCLI, "diff-local", "-p", mpr_path, "--ref", f"{before}..{after}"],
-            check=True, capture_output=True, text=True, timeout=60,
+            check=True, capture_output=True, text=True, timeout=_TOOL_TIMEOUT,
             cwd=repo_path,
         )
         return result.stdout.strip() or "Geen wijzigingen gevonden."
@@ -33,7 +35,7 @@ def _mxcli(mpr_path: str, args: list[str]) -> str:
     try:
         result = subprocess.run(
             [MXCLI, "-p", mpr_path] + args,
-            check=True, capture_output=True, text=True, timeout=120,
+            check=True, capture_output=True, text=True, timeout=_TOOL_TIMEOUT,
         )
         return result.stdout.strip() or "(geen output)"
     except subprocess.CalledProcessError as e:

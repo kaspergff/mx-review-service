@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "system_prompt.md"
 
-MAX_TOOL_CALLS = 25
+MAX_TOOL_CALLS = int(os.getenv("MAX_TOOL_CALLS", "25"))
 
 
 def _load_system_prompt() -> str:

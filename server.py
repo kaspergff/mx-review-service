@@ -6,17 +6,15 @@ import hmac
 import hashlib
 import time
 import re
-from pathlib import Path
-import subprocess
-import tempfile
 import shutil
+import tempfile
 
 logger = logging.getLogger(__name__)
 
 import httpx
-import litellm
-from mendix.parser import parse_bytes, summarize, format_summary
-from fastapi import FastAPI, Request, HTTPException, status
+from agent.loop import run_agent
+from agent.repo import clone_repo, find_mpr
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
@@ -31,9 +29,7 @@ _raw_app_ids = os.environ.get("ALLOWED_APP_IDS", "")
 ALLOWED_APP_IDS: set[str] = set(_raw_app_ids.split(",")) - {""} if _raw_app_ids else set()
 MX_GIT_BASE_URL = os.environ.get("MX_GIT_BASE_URL", "https://git.api.mendix.com")
 MX_LOCAL_REPO = os.environ.get("MX_LOCAL_REPO", "")
-
-DIFF_CHAR_LIMIT = 15_000
-MAX_FILES_PER_DIFF = 50
+REVIEW_TIMEOUT_SECONDS = int(os.environ.get("REVIEW_TIMEOUT_SECONDS", "300"))
 
 
 def verify_signature(webhook_id: str, timestamp: str, signature_header: str, body: bytes) -> None:
@@ -78,149 +74,6 @@ class ReviewRequest(BaseModel):
         return v
 
 
-def _git(args: list[str], cwd: str, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", cwd] + args, check=True, capture_output=True, **kwargs)
-
-
-def _parse_mxunit_at(cwd: str, ref: str, path: str) -> dict | None:
-    """Parseer een .mxunit bestand op een specifiek git commit ref. Geeft None bij fout."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd, "show", f"{ref}:{path}"],
-            check=True, capture_output=True,
-        )
-        return summarize(parse_bytes(result.stdout))
-    except Exception as e:
-        logger.warning("Failed to parse %s at %s: %s", path, ref, e)
-        return None
-
-
-def _format_mxunit_change(path: str, before: dict | None, after: dict | None) -> str:
-    """Formatteer een voor/na vergelijking van één .mxunit bestand als markdown."""
-    filename = path.split('/')[-1]
-    if before is None and after is None:
-        return f"### Hernoemd/onleesbaar: `{filename}`\n_(niet parseerbaar)_"
-    if before is None:
-        label = f"### Toegevoegd: `{filename}`"
-        return f"{label}\n{format_summary(after)}"
-    if after is None:
-        label = f"### Verwijderd: `{filename}`"
-        return f"{label}\n{format_summary(before)}"
-    label = f"### Gewijzigd: `{filename}`"
-    return f"{label}\n**Voor:**\n{format_summary(before)}\n\n**Na:**\n{format_summary(after)}"
-
-
-def get_diff(app_id: str, before: str, after: str) -> str:
-    """
-    Clone de Mendix repo, parseer gewijzigde .mxunit bestanden naar leesbare markdown,
-    en voeg tekst-diffs toe voor java/js/scss bestanden. Gecapt op DIFF_CHAR_LIMIT tekens.
-    """
-    if MX_LOCAL_REPO:
-        # Gebruik de lokale repo direct — geen clone nodig
-        work_dir = MX_LOCAL_REPO
-        tmp_dir = None
-    else:
-        repo_url = f"{MX_GIT_BASE_URL}/{app_id}.git"
-        auth_header = "Authorization: Basic " + base64.b64encode(f"pat:{MX_PAT}".encode()).decode()
-        tmp_dir = tempfile.mkdtemp()
-        work_dir = tmp_dir
-        clone_args = ["git", "clone", "--depth", "2", "--no-single-branch"]
-        if MX_GIT_BASE_URL.startswith("https://"):
-            clone_args += ["-c", f"http.{MX_GIT_BASE_URL}/.extraHeader={auth_header}"]
-        clone_args += [repo_url, tmp_dir]
-        subprocess.run(clone_args, check=True, capture_output=True, timeout=60)
-    try:
-
-        # Lijst van gewijzigde bestanden met status (A=added, M=modified, D=deleted)
-        name_status = _git(
-            ["diff", "--name-status", f"{before}..{after}"],
-            work_dir, text=True,
-        ).stdout.strip()
-
-        if not name_status:
-            return "Geen wijzigingen gevonden."
-
-        sections: list[str] = []
-        processed = 0
-
-        for line in name_status.splitlines():
-            if processed >= MAX_FILES_PER_DIFF:
-                sections.append(f"_(meer dan {MAX_FILES_PER_DIFF} bestanden gewijzigd, rest overgeslagen)_")
-                break
-
-            parts = line.split('\t')
-            if len(parts) < 2:
-                continue
-            change_type = parts[0].strip()
-
-            # Renames: R<percent><TAB>old_path<TAB>new_path
-            if change_type.startswith('R') and len(parts) == 3:
-                old_path, new_path = parts[1].strip(), parts[2].strip()
-                if new_path.endswith('.mxunit'):
-                    before_doc = _parse_mxunit_at(work_dir, before, old_path)
-                    after_doc = _parse_mxunit_at(work_dir, after, new_path)
-                    sections.append(_format_mxunit_change(new_path, before_doc, after_doc))
-                    processed += 1
-                continue
-
-            path = parts[1].strip()
-
-            if path.endswith('.mxunit'):
-                before_doc = _parse_mxunit_at(work_dir, before, path) if change_type != 'A' else None
-                after_doc = _parse_mxunit_at(work_dir, after, path) if change_type != 'D' else None
-                sections.append(_format_mxunit_change(path, before_doc, after_doc))
-                processed += 1
-
-            elif any(path.startswith(p) for p in ('javasource/', 'javascriptsource/', 'themesource/')):
-                diff = _git(
-                    ["diff", f"{before}..{after}", "--", path],
-                    work_dir, text=True,
-                ).stdout
-                if diff.strip():
-                    sections.append(f"### Tekstwijziging: `{path}`\n```\n{diff[:3000]}\n```")
-                processed += 1
-
-        return '\n\n'.join(sections)[:DIFF_CHAR_LIMIT]
-
-    except subprocess.CalledProcessError:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Git operation failed",
-        )
-    finally:
-        if tmp_dir:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
-
-if not _SYSTEM_PROMPT_PATH.exists():
-    raise RuntimeError(f"System prompt bestand niet gevonden: {_SYSTEM_PROMPT_PATH}")
-
-
-def _load_system_prompt() -> str:
-    return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
-
-
-async def review_diff(diff: str) -> str:
-    """Send diff to the configured LLM and return the review text."""
-    try:
-        response = await litellm.acompletion(
-            model=LLM_MODEL,
-            max_tokens=600,
-            messages=[
-                {"role": "system", "content": _load_system_prompt()},
-                {"role": "user", "content": f"Review this Mendix commit diff:\n\n{diff}"},
-            ],
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"LLM error: {e}",
-        )
-
-
 async def post_to_teams(
     author: str,
     commit_hash: str,
@@ -248,16 +101,8 @@ async def post_to_teams(
                                 {"title": "Message", "value": commit_message},
                             ],
                         },
-                        {
-                            "type": "TextBlock",
-                            "text": "**Code Review**",
-                            "weight": "Bolder",
-                        },
-                        {
-                            "type": "TextBlock",
-                            "text": review,
-                            "wrap": True,
-                        },
+                        {"type": "TextBlock", "text": "**Code Review**", "weight": "Bolder"},
+                        {"type": "TextBlock", "text": review, "wrap": True},
                     ],
                 },
             }
@@ -273,6 +118,48 @@ async def post_to_teams(
         )
 
 
+async def _run_review(payload: ReviewRequest) -> None:
+    """Background task: clone repo, run agent, post to Teams."""
+    tmp_dir = None
+    try:
+        if MX_LOCAL_REPO:
+            repo_path = MX_LOCAL_REPO
+        else:
+            tmp_dir = tempfile.mkdtemp()
+            await asyncio.to_thread(
+                clone_repo, payload.appId, tmp_dir, MX_GIT_BASE_URL, MX_PAT
+            )
+            repo_path = tmp_dir
+
+        mpr_path = find_mpr(repo_path)
+        review_text = await run_agent(
+            payload=payload,
+            repo_path=repo_path,
+            mpr_path=mpr_path,
+            model=LLM_MODEL,
+            timeout=REVIEW_TIMEOUT_SECONDS,
+        )
+
+        if TEAMS_WEBHOOK_URL:
+            await post_to_teams(
+                author=payload.authorName,
+                commit_hash=payload.after,
+                commit_message=payload.commitMessage,
+                branch=payload.branchName,
+                review=review_text,
+            )
+        else:
+            logger.info(
+                "[review] %s %s %s\n%s",
+                payload.authorName, payload.branchName, payload.after[:12], review_text,
+            )
+    except Exception:
+        logger.exception("Review failed for commit %s", payload.after[:12])
+    finally:
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 app = FastAPI(docs_url=None, redoc_url=None)
 
 
@@ -281,8 +168,8 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/review")
-async def review(request: Request) -> JSONResponse:
+@app.post("/review", status_code=202)
+async def review(request: Request, background_tasks: BackgroundTasks) -> JSONResponse:
     body = await request.body()
 
     webhook_id = request.headers.get("webhook-id")
@@ -299,19 +186,5 @@ async def review(request: Request) -> JSONResponse:
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 
-    loop = asyncio.get_running_loop()
-    diff = await loop.run_in_executor(None, get_diff, payload.appId, payload.before, payload.after)
-
-    review_text = await review_diff(diff)
-    if TEAMS_WEBHOOK_URL:
-        await post_to_teams(
-            author=payload.authorName,
-            commit_hash=payload.after,
-            commit_message=payload.commitMessage,
-            branch=payload.branchName,
-            review=review_text,
-        )
-    else:
-        print(f"[review] author={payload.authorName} branch={payload.branchName} commit={payload.after[:12]}\n{review_text}")
-
-    return JSONResponse({"status": "ok", "review": review_text})
+    background_tasks.add_task(_run_review, payload)
+    return JSONResponse({"status": "accepted"}, status_code=202)

@@ -10,6 +10,20 @@
 
 ---
 
+## mxcli command reference (verified against v0.12.0)
+
+| Tool | Command | Notes |
+|---|---|---|
+| `get_diff()` | `mxcli diff-local -p {mpr} --ref {before}..{after}` | Must run with `cwd=repo_path` |
+| `get_context(name)` | `mxcli context -p {mpr} {name} --depth {depth}` | Builds catalog on first call (slow), cached after |
+| `lint_project()` | `mxcli lint -p {mpr}` | — |
+| `search(query)` | `mxcli search -p {mpr} {query}` | Requires catalog |
+
+`get_diff()` returns MDL diffs (human-readable, shows element names inline).  
+`get_context()` auto-detects element type — no need to specify `microflow`/`entity`/etc.
+
+---
+
 ## File Map
 
 | File | Action | Responsibility |
@@ -30,33 +44,18 @@
 
 ---
 
-## Task 0: Verify mxcli works without JDK
+## Task 0: Verify mxcli works without JDK ✅ COMPLETE
 
-Manual verification before writing any code. mxcli is a Go binary — JDK should only be needed for MxBuild (compiling), not for read-only queries.
+Verified: mxcli v0.12.0 is a standalone Go binary. No JDK needed.
 
-**Files:** none
+Commands confirmed working:
+- `mxcli --version` → prints version with no Java dependency
+- `mxcli diff-local -p app.mpr --ref before..after` → MDL diffs (must run from within repo dir)
+- `mxcli context -p app.mpr Module.Element` → rich LLM context, builds catalog on first call
+- `mxcli lint -p app.mpr` → quality checks
+- `mxcli search -p app.mpr <query>` → searches captions/source
 
-- [ ] **Step 1: Download mxcli binary locally**
-
-```bash
-curl -L https://github.com/mendixlabs/mxcli/releases/download/v0.12.0/mxcli-linux-amd64 -o /tmp/mxcli
-chmod +x /tmp/mxcli
-/tmp/mxcli --version
-```
-
-Expected: prints version without requiring Java.
-
-- [ ] **Step 2: Run a read-only query against your local .mpr**
-
-```bash
-/tmp/mxcli describe -p /path/to/your/app.mpr <Module.SomeElement>
-```
-
-Expected: structured output, no JDK error. If you see `java not found` or similar → add `eclipse-temurin:21-jre-alpine` to the Dockerfile base image.
-
-- [ ] **Step 3: Record result**
-
-Document whether JDK is needed in the spec open points section. This determines the Dockerfile base image in Task 7.
+Dockerfile uses `python:3.12-slim` base (no JDK layer needed).
 
 ---
 
@@ -190,7 +189,10 @@ git commit -m "feat: add agent/repo.py — git clone and .mpr discovery"
 
 ## Task 2: agent/tools.py
 
-Read-only mxcli tool functions and the LiteLLM tool schema list. All functions are synchronous — the loop will call them via `asyncio.to_thread`.
+Four read-only mxcli tools. All functions synchronous — loop calls them via `asyncio.to_thread`.
+
+`get_diff` must pass `cwd=repo_path` to subprocess so mxcli finds the git repo.  
+`get_context` builds the mxcli catalog on first call (~10-20s for large projects), then it is cached for subsequent calls within the same process.
 
 **Files:**
 - Create: `agent/tools.py`
@@ -207,11 +209,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from agent.tools import (
-    list_changed_files,
-    describe_element,
-    find_refs,
-    find_callers,
-    find_callees,
+    get_diff,
+    get_context,
     lint_project,
     search,
     execute_tool,
@@ -225,65 +224,43 @@ def _mock_run(stdout: str):
     return r
 
 
-def test_list_changed_files_returns_git_output():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("M\tSales/ACT_Test.mxunit")) as mock:
-        result = list_changed_files("/repo", "aaa", "bbb")
-    assert "ACT_Test" in result
+def test_get_diff_calls_mxcli_diff_local():
+    with patch("agent.tools.subprocess.run", return_value=_mock_run("--- Microflow ...")) as mock:
+        result = get_diff("/repo", "/repo/App.mpr", "aaa", "bbb")
     args = mock.call_args[0][0]
-    assert "diff" in args
-    assert "--name-status" in args
+    assert "diff-local" in args
+    assert "--ref" in args
     assert "aaa..bbb" in args
+    assert mock.call_args[1].get("cwd") == "/repo"
+    assert "Microflow" in result
 
 
-def test_list_changed_files_empty():
+def test_get_diff_empty_returns_message():
     with patch("agent.tools.subprocess.run", return_value=_mock_run("")):
-        result = list_changed_files("/repo", "aaa", "bbb")
-    assert result == "Geen wijzigingen gevonden."
+        result = get_diff("/repo", "/repo/App.mpr", "aaa", "bbb")
+    assert "geen" in result.lower() or "no" in result.lower()
 
 
-def test_describe_element_calls_mxcli():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("Microflow: ACT_Test")) as mock:
-        result = describe_element("/app.mpr", "Sales.ACT_Test")
-    assert "ACT_Test" in result
+def test_get_context_calls_mxcli_context():
+    with patch("agent.tools.subprocess.run", return_value=_mock_run("Context for Sales.ACT_Test")) as mock:
+        result = get_context("/app.mpr", "Sales.ACT_Test")
     args = mock.call_args[0][0]
-    assert "describe" in args
+    assert "context" in args
     assert "Sales.ACT_Test" in args
+    assert "ACT_Test" in result
 
 
-def test_find_refs_calls_mxcli_refs():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("refs output")) as mock:
-        result = find_refs("/app.mpr", "Sales.Customer")
-    assert "refs output" in result
+def test_get_context_passes_depth():
+    with patch("agent.tools.subprocess.run", return_value=_mock_run("context")) as mock:
+        get_context("/app.mpr", "Sales.ACT_Test", depth=3)
     args = mock.call_args[0][0]
-    assert "refs" in args
-    assert "Sales.Customer" in args
-
-
-def test_find_callers_plain():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("caller: MF_A")) as mock:
-        result = find_callers("/app.mpr", "Sales.ACT_Test", transitive=False)
-    args = mock.call_args[0][0]
-    assert "callers" in args
-    assert "--transitive" not in args
-
-
-def test_find_callers_transitive():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("chain")) as mock:
-        find_callers("/app.mpr", "Sales.ACT_Test", transitive=True)
-    args = mock.call_args[0][0]
-    assert "--transitive" in args
-
-
-def test_find_callees_calls_mxcli():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("callee output")) as mock:
-        find_callees("/app.mpr", "Sales.ACT_Test")
-    args = mock.call_args[0][0]
-    assert "callees" in args
+    assert "--depth" in args
+    assert "3" in args
 
 
 def test_lint_project_calls_mxcli_lint():
-    with patch("agent.tools.subprocess.run", return_value=_mock_run("lint: 3 issues")) as mock:
-        result = lint_project("/app.mpr")
+    with patch("agent.tools.subprocess.run", return_value=_mock_run("3 issues found")) as mock:
+        result = lint_project("/repo", "/app.mpr")
     assert "lint" in mock.call_args[0][0]
     assert "issues" in result
 
@@ -296,25 +273,35 @@ def test_search_calls_mxcli_search():
     assert "commit transaction" in args
 
 
-def test_execute_tool_dispatches_list_changed_files():
+def test_execute_tool_dispatches_get_diff():
     tc = MagicMock()
-    tc.function.name = "list_changed_files"
+    tc.function.name = "get_diff"
     tc.function.arguments = "{}"
     ctx = {"repo_path": "/repo", "mpr_path": "/app.mpr", "before": "a" * 40, "after": "b" * 40}
-    with patch("agent.tools.list_changed_files", return_value="changed") as mock:
+    with patch("agent.tools.get_diff", return_value="diff output") as mock:
         result = execute_tool(tc, ctx)
-    mock.assert_called_once_with("/repo", "a" * 40, "b" * 40)
-    assert result == "changed"
+    mock.assert_called_once_with("/repo", "/app.mpr", "a" * 40, "b" * 40)
+    assert result == "diff output"
 
 
-def test_execute_tool_dispatches_describe_element():
+def test_execute_tool_dispatches_get_context():
     tc = MagicMock()
-    tc.function.name = "describe_element"
+    tc.function.name = "get_context"
     tc.function.arguments = json.dumps({"name": "Sales.ACT_Test"})
     ctx = {"repo_path": "/repo", "mpr_path": "/app.mpr", "before": "a" * 40, "after": "b" * 40}
-    with patch("agent.tools.describe_element", return_value="desc") as mock:
+    with patch("agent.tools.get_context", return_value="ctx") as mock:
         execute_tool(tc, ctx)
-    mock.assert_called_once_with("/app.mpr", "Sales.ACT_Test")
+    mock.assert_called_once_with("/app.mpr", "Sales.ACT_Test", depth=2)
+
+
+def test_execute_tool_dispatches_get_context_with_depth():
+    tc = MagicMock()
+    tc.function.name = "get_context"
+    tc.function.arguments = json.dumps({"name": "Sales.ACT_Test", "depth": 4})
+    ctx = {"repo_path": "/repo", "mpr_path": "/app.mpr", "before": "a" * 40, "after": "b" * 40}
+    with patch("agent.tools.get_context", return_value="ctx") as mock:
+        execute_tool(tc, ctx)
+    mock.assert_called_once_with("/app.mpr", "Sales.ACT_Test", depth=4)
 
 
 def test_execute_tool_unknown_returns_error():
@@ -334,13 +321,15 @@ def test_tool_schemas_are_read_only():
 
 def test_tool_schemas_cover_all_tools():
     names = {t["function"]["name"] for t in TOOL_SCHEMAS}
-    expected = {"list_changed_files", "describe_element", "find_refs", "find_callers", "find_callees", "lint_project", "search"}
-    assert names == expected
+    assert names == {"get_diff", "get_context", "lint_project", "search"}
 
 
 def test_mxcli_error_returns_error_string():
-    with patch("agent.tools.subprocess.run", side_effect=subprocess.CalledProcessError(1, "mxcli", stderr=b"element not found")):
-        result = describe_element("/app.mpr", "Sales.DoesNotExist")
+    with patch(
+        "agent.tools.subprocess.run",
+        side_effect=subprocess.CalledProcessError(1, "mxcli", stderr=b"element not found"),
+    ):
+        result = get_context("/app.mpr", "Sales.DoesNotExist")
     assert "fout" in result.lower() or "error" in result.lower()
 ```
 
@@ -350,7 +339,7 @@ def test_mxcli_error_returns_error_string():
 .venv/bin/pytest tests/test_agent_tools.py -v
 ```
 
-Expected: `ModuleNotFoundError: cannot import name 'list_changed_files' from 'agent.tools'`
+Expected: `ModuleNotFoundError: cannot import name 'get_diff' from 'agent.tools'`
 
 - [ ] **Step 3: Implement agent/tools.py**
 
@@ -364,34 +353,23 @@ from typing import Any
 MXCLI = "mxcli"
 
 
-def list_changed_files(repo_path: str, before: str, after: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", repo_path, "diff", "--name-status", f"{before}..{after}"],
-        check=True, capture_output=True, text=True, timeout=30,
-    )
-    return result.stdout.strip() or "Geen wijzigingen gevonden."
+def get_diff(repo_path: str, mpr_path: str, before: str, after: str) -> str:
+    try:
+        result = subprocess.run(
+            [MXCLI, "diff-local", "-p", mpr_path, "--ref", f"{before}..{after}"],
+            check=True, capture_output=True, text=True, timeout=60,
+            cwd=repo_path,
+        )
+        return result.stdout.strip() or "Geen wijzigingen gevonden."
+    except subprocess.CalledProcessError as e:
+        return f"mxcli fout: {e.stderr.strip()}"
 
 
-def describe_element(mpr_path: str, name: str) -> str:
-    return _mxcli(mpr_path, ["describe", name])
+def get_context(mpr_path: str, name: str, depth: int = 2) -> str:
+    return _mxcli(mpr_path, ["context", name, "--depth", str(depth)])
 
 
-def find_refs(mpr_path: str, name: str) -> str:
-    return _mxcli(mpr_path, ["refs", name])
-
-
-def find_callers(mpr_path: str, name: str, transitive: bool = False) -> str:
-    args = ["callers", name]
-    if transitive:
-        args.append("--transitive")
-    return _mxcli(mpr_path, args)
-
-
-def find_callees(mpr_path: str, name: str) -> str:
-    return _mxcli(mpr_path, ["callees", name])
-
-
-def lint_project(mpr_path: str) -> str:
+def lint_project(repo_path: str, mpr_path: str) -> str:
     return _mxcli(mpr_path, ["lint"])
 
 
@@ -403,7 +381,7 @@ def _mxcli(mpr_path: str, args: list[str]) -> str:
     try:
         result = subprocess.run(
             [MXCLI, "-p", mpr_path] + args,
-            check=True, capture_output=True, text=True, timeout=60,
+            check=True, capture_output=True, text=True, timeout=120,
         )
         return result.stdout.strip() or "(geen output)"
     except subprocess.CalledProcessError as e:
@@ -417,18 +395,12 @@ def execute_tool(tool_call: Any, ctx: dict) -> str:
     mpr_path = ctx["mpr_path"]
 
     match name:
-        case "list_changed_files":
-            return list_changed_files(repo_path, ctx["before"], ctx["after"])
-        case "describe_element":
-            return describe_element(mpr_path, args["name"])
-        case "find_refs":
-            return find_refs(mpr_path, args["name"])
-        case "find_callers":
-            return find_callers(mpr_path, args["name"], args.get("transitive", False))
-        case "find_callees":
-            return find_callees(mpr_path, args["name"])
+        case "get_diff":
+            return get_diff(repo_path, mpr_path, ctx["before"], ctx["after"])
+        case "get_context":
+            return get_context(mpr_path, args["name"], depth=args.get("depth", 2))
         case "lint_project":
-            return lint_project(mpr_path)
+            return lint_project(repo_path, mpr_path)
         case "search":
             return search(mpr_path, args["query"])
         case _:
@@ -439,63 +411,37 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "list_changed_files",
-            "description": "Geeft de bestanden die gewijzigd zijn in deze commit (A=toegevoegd, M=gewijzigd, D=verwijderd).",
+            "name": "get_diff",
+            "description": (
+                "Toont de MDL-diff van alle elementen die gewijzigd zijn in deze commit. "
+                "Geeft leesbare before/after vergelijking in Mendix Definition Language. "
+                "Roep dit altijd als eerste aan."
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "describe_element",
-            "description": "Volledige definitie van een Mendix element (microflow, entiteit, pagina, etc.).",
+            "name": "get_context",
+            "description": (
+                "Haalt rijke context op voor een Mendix element (microflow, entiteit, pagina, etc.). "
+                "Detecteert het type automatisch. Geeft definitie, callers, callees, gebruikte entiteiten "
+                "en pagina's — alles wat je nodig hebt om risico in te schatten. "
+                "Gebruik dit voor elk element dat er riskant uitziet in de diff."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Gekwalificeerde naam, bijv. Sales.ACT_CreateOrder"},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_refs",
-            "description": "Alle inkomende + uitgaande referenties van een element. Gebruik voor blast-radius analyse.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Gekwalificeerde naam van het element"},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_callers",
-            "description": "Welke microflows roepen dit element aan. Gebruik transitive=true voor de volledige call chain.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Gekwalificeerde naam van het element"},
-                    "transitive": {"type": "boolean", "description": "Volledige transitive call chain", "default": False},
-                },
-                "required": ["name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_callees",
-            "description": "Wat roept dit element aan — directe afhankelijkheden.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Gekwalificeerde naam van het element"},
+                    "name": {
+                        "type": "string",
+                        "description": "Gekwalificeerde naam, bijv. Sales.ACT_CreateOrder of Sales.Customer",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Diepte van call-chain traversal (default 2, max 4)",
+                        "default": 2,
+                    },
                 },
                 "required": ["name"],
             },
@@ -505,7 +451,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "lint_project",
-            "description": "Voert kwaliteitsregels uit op het hele project.",
+            "description": "Voert kwaliteitsregels uit op het hele project. Gebruik als je twijfelt aan naminconventies of lege microflows.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -600,7 +546,7 @@ def _stop_response(content: str):
 @pytest.mark.asyncio
 async def test_loop_returns_final_review():
     responses = [
-        _tool_call_response("list_changed_files", {}),
+        _tool_call_response("get_diff", {}),
         _stop_response("Geen bevindingen."),
     ]
     payload = MagicMock()
@@ -611,7 +557,7 @@ async def test_loop_returns_final_review():
     payload.commitMessage = "Fix bug"
 
     with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=responses), \
-         patch("agent.loop.execute_tool", return_value="file1.mxunit"):
+         patch("agent.loop.execute_tool", return_value="diff output"):
         result = await run_agent(payload, "/repo", "/app.mpr", "claude-sonnet", timeout=60)
 
     assert result == "Geen bevindingen."
@@ -619,7 +565,7 @@ async def test_loop_returns_final_review():
 
 @pytest.mark.asyncio
 async def test_loop_stops_at_max_tool_calls():
-    responses = [_tool_call_response("list_changed_files", {})] * 30
+    responses = [_tool_call_response("get_diff", {})] * 30
 
     payload = MagicMock()
     payload.before = "a" * 40
@@ -660,7 +606,7 @@ async def test_loop_passes_tool_result_back():
     async def fake_completion(**kwargs):
         captured_messages.extend(kwargs["messages"])
         if len(captured_messages) < 4:
-            return _tool_call_response("list_changed_files", {})
+            return _tool_call_response("get_diff", {})
         return _stop_response("Review gedaan.")
 
     payload = MagicMock()
@@ -671,7 +617,7 @@ async def test_loop_passes_tool_result_back():
     payload.commitMessage = "Fix"
 
     with patch("litellm.acompletion", new_callable=AsyncMock, side_effect=fake_completion), \
-         patch("agent.loop.execute_tool", return_value="changed: ACT_Test.mxunit"):
+         patch("agent.loop.execute_tool", return_value="diff: ACT_Test changed"):
         await run_agent(payload, "/repo", "/app.mpr", "claude-sonnet", timeout=60)
 
     roles = [m["role"] for m in captured_messages if isinstance(m, dict)]
@@ -806,8 +752,6 @@ git commit -m "feat: add agent/loop.py — agentic review loop with tool use"
 
 ## Task 4: Rewrite system_prompt.md
 
-The existing prompt is written for a static diff. It needs to guide a navigating agent.
-
 **Files:**
 - Modify: `prompts/system_prompt.md`
 
@@ -820,14 +764,12 @@ Je bent een senior Mendix developer die een commit reviewt. Je hebt tools om het
 
 ## Werkwijze
 
-1. Begin altijd met `list_changed_files` om te zien welke elementen gewijzigd zijn.
-2. Gebruik `describe_element` om te begrijpen wat een gewijzigd element doet.
-3. Gebruik `find_refs` als je wilt weten wat er afhangt van een gewijzigd element (blast radius).
-4. Gebruik `find_callers` of `find_callees` als je de call-richting specifiek wilt traceren.
-5. Wees selectief: niet elk element heeft diepere analyse nodig. Focus op wat riskant lijkt.
-6. Gebruik `search` als je een specifiek patroon wilt zoeken (bijv. een hardcoded waarde of aanroep).
-7. Gebruik `lint_project` als je twijfelt of er kwaliteitsproblemen zijn.
-8. Geef je final review zodra je genoeg weet. Je hoeft niet alle tools te gebruiken.
+1. Begin altijd met `get_diff` om te zien welke elementen gewijzigd zijn en hoe. De output is MDL (Mendix Definition Language) — leesbaar en direct.
+2. Gebruik `get_context` voor elk element dat er riskant uitziet. Dit geeft definitie, callers, callees, gebruikte entiteiten en pagina's in één aanroep.
+3. Gebruik `get_context` met `depth=3` of `depth=4` als je dieper wilt in de call chain.
+4. Gebruik `search` als je een specifiek patroon wilt vinden (bijv. een hardcoded waarde, aanroep of expressie).
+5. Gebruik `lint_project` als je twijfelt of er naamgevings- of structuurproblemen zijn.
+6. Geef je final review zodra je genoeg weet. Je hoeft niet alle tools te gebruiken.
 
 ## Denkwijze
 
@@ -860,7 +802,7 @@ Regels:
 
 ```bash
 git add prompts/system_prompt.md
-git commit -m "docs: herschrijf system prompt voor navigerende agent"
+git commit -m "docs: herschrijf system prompt voor navigerende agent met mxcli"
 ```
 
 ---
@@ -905,19 +847,19 @@ def test_review_endpoint_returns_202():
     assert response.json() == {"status": "accepted"}
 ```
 
-Also remove `test_get_diff_returns_parsed_markdown`, `test_get_diff_truncates_at_limit`, `test_get_diff_subprocess_error_raises`, `test_review_diff_returns_text`, `test_review_diff_raises_on_api_error`, `test_get_diff_clone_depth_handles_multi_commit_push`, `test_get_diff_tmpdir_cleaned_up_on_clone_failure`, `test_get_diff_truncation_stops_at_section_boundary`, and `test_review_diff_uses_sufficient_max_tokens` — these test code that will be deleted.
+Also remove these tests that test deleted code: `test_get_diff_returns_parsed_markdown`, `test_get_diff_truncates_at_limit`, `test_get_diff_subprocess_error_raises`, `test_review_diff_returns_text`, `test_review_diff_raises_on_api_error`, `test_get_diff_clone_depth_handles_multi_commit_push`, `test_get_diff_tmpdir_cleaned_up_on_clone_failure`, `test_get_diff_truncation_stops_at_section_boundary`, `test_review_diff_uses_sufficient_max_tokens`.
 
-- [ ] **Step 2: Run updated tests to verify they fail**
+- [ ] **Step 2: Run updated test to verify it fails**
 
 ```bash
 .venv/bin/pytest tests/test_server.py::test_review_endpoint_returns_202 -v
 ```
 
-Expected: FAIL — endpoint still returns 200.
+Expected: FAIL — endpoint returns 200, not 202.
 
 - [ ] **Step 3: Rewrite server.py**
 
-Replace `server.py` with the following. Keep `verify_signature`, `ReviewRequest`, `post_to_teams`, `health`, and the app definition. Remove `get_diff`, `review_diff`, `_parse_mxunit_at`, `_format_mxunit_change`, `_load_system_prompt`, `_SYSTEM_PROMPT_PATH`, and the old `review` endpoint.
+Replace `server.py`:
 
 ```python
 import asyncio
@@ -1118,7 +1060,7 @@ async def review(request: Request, background_tasks: BackgroundTasks) -> JSONRes
 .venv/bin/pytest tests/test_server.py -v
 ```
 
-Expected: all remaining tests PASS (signature tests, validation tests, Teams tests, health).
+Expected: all remaining tests PASS (signature tests, validation tests, Teams tests, health, 202 test).
 
 - [ ] **Step 5: Commit**
 
@@ -1143,18 +1085,7 @@ rm mendix/__init__.py
 rmdir mendix
 ```
 
-- [ ] **Step 2: Clean up test_server.py imports**
-
-In `tests/test_server.py`, find and remove:
-```python
-from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest, get_diff
-```
-Replace with:
-```python
-from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest
-```
-
-- [ ] **Step 3: Run all tests**
+- [ ] **Step 2: Run all tests**
 
 ```bash
 .venv/bin/pytest tests/ -v
@@ -1162,7 +1093,7 @@ from server import app, verify_signature, WEBHOOK_SECRET, ReviewRequest
 
 Expected: all tests PASS, no import errors.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add -u
@@ -1179,7 +1110,7 @@ git commit -m "chore: remove mendix/parser.py — replaced by mxcli"
 
 - [ ] **Step 1: Create Dockerfile**
 
-Create `Dockerfile`. Use the JDK base image if Task 0 showed it's needed, otherwise use `python:3.12-slim`:
+Create `Dockerfile`:
 
 ```dockerfile
 FROM python:3.12-slim
@@ -1203,26 +1134,26 @@ CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
 
 - [ ] **Step 2: Add REVIEW_TIMEOUT_SECONDS to .env.example**
 
-Open `.env.example` and add:
+Add to `.env.example`:
 ```
 REVIEW_TIMEOUT_SECONDS=300
 ```
 
-- [ ] **Step 3: Build the image to verify it works**
+- [ ] **Step 3: Verify Dockerfile builds**
 
 ```bash
 docker build -t mx-review-service .
 ```
 
-Expected: build succeeds, mxcli binary present in image.
+Expected: build succeeds.
 
-- [ ] **Step 4: Verify mxcli in image (no JDK test)**
+- [ ] **Step 4: Verify mxcli in image**
 
 ```bash
 docker run --rm mx-review-service mxcli --version
 ```
 
-Expected: version printed, no Java error.
+Expected: `mxcli version v0.12.0` with no Java error.
 
 - [ ] **Step 5: Commit**
 
@@ -1241,15 +1172,15 @@ git commit -m "feat: add Dockerfile with mxcli v0.12.0"
 .venv/bin/pytest tests/ -v
 ```
 
-Expected: all tests PASS, no import errors, no deprecation warnings from pytest-asyncio.
+Expected: all tests PASS.
 
 - [ ] **Step 2: Verify no old references remain**
 
 ```bash
-grep -r "parser\|get_diff\|review_diff\|DIFF_CHAR_LIMIT\|mxunit" server.py tests/ agent/
+grep -r "parser\|get_diff\|review_diff\|DIFF_CHAR_LIMIT\|mxunit\|parse_bytes\|summarize" server.py tests/ agent/ 2>/dev/null
 ```
 
-Expected: no matches (or only in comments/test fixtures that are valid).
+Expected: no matches.
 
 - [ ] **Step 3: Final commit**
 

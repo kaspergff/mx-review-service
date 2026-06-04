@@ -56,9 +56,9 @@ Het model krijgt uitsluitend read-only tools. Schrijf-commando's van mxcli (`cre
 |---|---|---|
 | `list_changed_files()` | `git diff --name-status before..after` | Welke elementen zijn gewijzigd |
 | `describe_element(name)` | `mxcli describe <name>` | Volledige definitie van een element |
-| `find_callers(name)` | `mxcli callers <name>` | Welke flows roepen dit aan |
+| `find_refs(name)` | `mxcli refs <name>` | Alle inkomende + uitgaande referenties (blast radius: wat gebruikt dit element, wat gebruikt het zelf) |
+| `find_callers(name)` | `mxcli callers <name>` | Welke flows roepen dit aan (gerichte call-graph, ondersteunt `--transitive`) |
 | `find_callees(name)` | `mxcli callees <name>` | Wat roept dit element aan |
-| `find_impact(name)` | `mxcli impact <name>` | Wat breekt als dit element verandert |
 | `lint_project()` | `mxcli lint` | Kwaliteitsregels over het project |
 | `search(query)` | `mxcli search <query>` | Zoek door log messages, captions, expressies |
 

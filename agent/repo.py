@@ -1,3 +1,4 @@
+import base64
 import subprocess
 from pathlib import Path
 
@@ -15,7 +16,8 @@ def clone_repo(app_id: str, target: str, git_base_url: str, mx_pat: str) -> None
     args = ["git", "clone", "--depth", "50", "--no-single-branch"]
     if git_base_url.startswith("https://"):
         # Pass PAT via git config for HTTPS URLs
-        args += ["-c", f"http.{git_base_url}/.extraHeader=Authorization: Basic pat:{mx_pat}"]
+        auth_value = base64.b64encode(f"pat:{mx_pat}".encode()).decode()
+        args += ["-c", f"http.{git_base_url}/.extraHeader=Authorization: Basic {auth_value}"]
     args += [repo_url, target]
 
     subprocess.run(args, check=True, capture_output=True, timeout=120)

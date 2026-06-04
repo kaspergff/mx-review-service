@@ -1,3 +1,4 @@
+import base64
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -40,7 +41,8 @@ def test_clone_repo_calls_git_with_pat():
     assert "git" in args
     assert "clone" in args
     assert "--depth" in args
-    assert any("pat:mytoken" in str(a) for a in args)
+    expected_b64 = base64.b64encode(b"pat:mytoken").decode()
+    assert any(expected_b64 in str(a) for a in args)
     assert "https://git.api.mendix.com/abc-123.git" in args
 
 

@@ -1,3 +1,25 @@
+# README Redesign Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Fully rewrite README.md in English with 10 structured sections, a Mermaid request flow diagram, and accurate configuration reference.
+
+**Architecture:** Single file replacement — `README.md` in the repo root. No code changes, no tests needed. One commit.
+
+**Tech Stack:** Markdown, Mermaid (rendered by GitHub/GitLab)
+
+---
+
+### Task 1: Replace README.md
+
+**Files:**
+- Modify: `README.md`
+
+- [ ] **Step 1: Replace the file with the full content below**
+
+Write the following content exactly to `README.md`:
+
+````markdown
 # Mendix Commit Review Service
 
 Receives Mendix Pipeline webhooks, reviews the commit with an agentic LLM loop, and posts results to Microsoft Teams.
@@ -151,4 +173,20 @@ curl -X POST http://localhost:8000/review \
 
 ```bash
 .venv/bin/pytest tests/ -v
+```
+````
+
+- [ ] **Step 2: Verify the file looks correct**
+
+Open `README.md` and confirm:
+- All 10 sections are present
+- Mermaid block starts with ` ```mermaid `
+- Configuration table has 13 rows (all variables including `MAX_TOOL_CALLS`, `MXCLI_TOOL_TIMEOUT_SECONDS`)
+- No Dutch text anywhere
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add README.md docs/superpowers/specs/2026-06-05-readme-redesign.md docs/superpowers/plans/2026-06-05-readme-redesign.md
+git commit -m "docs: rewrite README in English with Mermaid diagram and full config reference"
 ```

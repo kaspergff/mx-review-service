@@ -71,7 +71,8 @@ Copy the `https://` ngrok URL and use it as the webhook URL in Mendix (see [Mend
 | `REVIEW_TIMEOUT_SECONDS` | No | `300` | Max duration of the agent loop in seconds |
 | `MAX_TOOL_CALLS` | No | `25` | Max number of mxcli tool calls per review |
 | `MXCLI_TOOL_TIMEOUT_SECONDS` | No | `300` | Max wait time per individual mxcli invocation |
-| `MX_LOCAL_REPO` | No | — | Path to a local Mendix repo; skips git clone (useful for local testing) |
+| `MX_LOCAL_REPO` | No | — | Path to a local Mendix project directory containing the `.mpr` file; skips git clone |
+| `MX_GIT_BASE_URL` | No | `https://git.api.mendix.com` | Base URL for Mendix Git API; override for self-hosted or custom environments |
 | `ANTHROPIC_API_KEY` | * | — | API key for Anthropic Claude |
 | `OPENAI_API_KEY` | * | — | API key for OpenAI |
 | `GEMINI_API_KEY` | * | — | API key for Google Gemini |
@@ -128,7 +129,7 @@ podman run -p 8000:8000 --env-file .env mx-review-service
 .venv/bin/python test_local.py
 ```
 
-Set `MX_LOCAL_REPO` in `.env` to point at a local `.mpr` file to skip git clone.
+Set `MX_LOCAL_REPO` in `.env` to point at your local Mendix project directory (the one containing the `.mpr` file) to skip git clone.
 
 ### With a signed test webhook
 

@@ -10,24 +10,31 @@ Receives Mendix Pipeline webhooks, reviews the commit with an agentic LLM loop, 
 ## How it works
 
 ```mermaid
-sequenceDiagram
-    participant M as Mendix Pipeline
-    participant S as Review Service
-    participant G as Git
-    participant L as LLM (via LiteLLM)
-    participant C as mxcli
-    participant T as Microsoft Teams
+stateDiagram-v2
+    [*] --> Received: POST /review
 
-    M->>S: POST /review (HMAC-signed)
-    S->>S: Verify HMAC-SHA256 + replay window
-    S-->>M: 202 Accepted
-    S->>G: git clone --depth 50
-    loop Agent loop (max 25 tool calls)
-        L->>C: get_diff / get_context / lint_project / search
-        C-->>L: mxcli output
-    end
-    L-->>S: Review result
-    S->>T: POST Adaptive Card
+    Received --> Rejected: HMAC invalid / app not allowed
+    Rejected --> [*]
+
+    Received --> Accepted: 202 Accepted
+
+    Accepted --> Cloning: git clone
+    Cloning --> Failed: clone error
+    Failed --> [*]
+
+    Cloning --> AgentLoop: agent loop start
+
+    state "Agent loop" as AgentLoop {
+        [*] --> Reasoning
+        state "Tool call" as ToolCall
+        Reasoning --> ToolCall: LLM invokes tool
+        ToolCall --> Reasoning: tool result returned
+        Reasoning --> [*]: done / timeout / max calls
+    }
+
+    AgentLoop --> Posted: review to Teams
+    AgentLoop --> Failed: unexpected error
+    Posted --> [*]
 ```
 
 The agent loop runs in the background after the webhook is acknowledged. The LLM receives a system prompt and iteratively calls read-only mxcli tools to navigate the Mendix model — inspecting the diff, fetching element context, running lint rules, and searching captions. After at most 25 tool calls (or `REVIEW_TIMEOUT_SECONDS`), it produces a structured review that is posted to Teams as an Adaptive Card.
